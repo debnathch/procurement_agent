@@ -1,0 +1,14 @@
+flowchart TD
+  MARG[MARG ERP] --> EXCEL[MARG Excel Adapter]
+  MARG --> API[MARG API Adapter - future]
+  EXCEL --> NORM[Common MARG Normalization]
+  API --> NORM
+  NORM --> V[Validation and Data Quality]
+  V --> CANON[Canonical Procurement Model]
+  CANON --> AGENT[Procurement Domain Agent]
+  AGENT --> FEFO[Demand + Inventory + Supplier + FEFO]
+  FEFO --> G[Deterministic Guardrails]
+  G --> HUMAN[Human Approval UI]
+  HUMAN --> EXEC[Execution Adapter]
+  EXEC --> MARG
+  HUMAN --> AUDIT[Audit + Feedback Memory]
