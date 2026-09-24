@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 import re
 import hashlib
+import calendar
 from datetime import datetime, timedelta
 from typing import Any
 import pandas as pd
@@ -55,7 +56,8 @@ COLUMN_ALIASES: dict[str, list[str]] = {
         'batchno', 'bno', 'batch', 'batchnumber', 'lot', 'lotno', 'lotnum', 'batch_no'
     ],
     'expiry_date': [
-        'expdate', 'expirydate', 'expiry', 'exp', 'expdt', 'exp_date', 'expiry_date'
+        'expdate', 'expirydate', 'expiry', 'exp', 'expdt', 'exp_date', 'expiry_date',
+        'val', 'validity', 'validupto', 'valdate', 'bbd', 'bestbefore'
     ],
     'qty_on_hand': [
         'clstock', 'closingstock', 'stock', 'balance', 'balqty', 'qty', 'onhand',
@@ -97,40 +99,93 @@ def _clean_str(val: Any) -> str:
     return ' '.join(str(val).split())
 
 
+MONTH_NAME_MAP: dict[str, int] = {
+    'JAN': 1, 'JANUARY': 1,
+    'FEB': 2, 'FEBRUARY': 2,
+    'MAR': 3, 'MARCH': 3,
+    'APR': 4, 'APRIL': 4,
+    'MAY': 5,
+    'JUN': 6, 'JUNE': 6,
+    'JUL': 7, 'JULY': 7,
+    'AUG': 8, 'AUGUST': 8,
+    'SEP': 9, 'SEPT': 9, 'SEPTEMBER': 9,
+    'OCT': 10, 'OCTOBER': 10,
+    'NOV': 11, 'NOVEMBER': 11,
+    'DEC': 12, 'DECEMBER': 12
+}
+
+
 def canonical_medicine_key(name: str) -> str:
     """
     Extracts the canonical medicine key by normalizing spacing, punctuation,
-    dosage forms, volume/weight units, and packing multiples across MARG reports.
-    E.g. 'AC-PLUS TABLET 10X2X10' and 'AC-PLUS TABLET' both yield 'ACPLUS'.
+    dosage forms, volume/weight units, packaging materials, and packing multiples across MARG reports.
+    E.g. 'AZIBEN-200 ORAL SUSPEN30ml' and 'AZIBEN-200 ORAL SUSPENSION 30ml' both yield 'AZIBEN200'.
+    'AC-PLUS TABLET 10X2X10' and 'AC-PLUS TABLET' both yield 'ACPLUS'.
     'ALLZYME-LARGE-BR SYRUP-200ML 200M.L' and 'ALLZYME-LARGE-BR' both yield 'ALLZYMELARGEBR'.
-    'ALKAJEM-SYRUP 100 M.L' and 'ALKAJEM-SYRUP 100' both yield 'ALKAJEM'.
+    'Moxit-L-500- (DWARKA P10X10' and 'Moxit-L-500- (DWARKA PHARMA) 10X10 CAP' both yield 'MOXITL500'.
     """
-    s = str(name).upper()
+    if not name:
+        return ''
+    s = str(name).upper().strip()
+
+    # 1. Remove parenthetical notes/companies even if unclosed: e.g. (DWARKA PHARMA), (DWARKA P
+    s = re.sub(r'\([^\)]*(?:\)|$)', ' ', s)
+
+    # 2. Normalize volume & weight units
     s = s.replace('M.L', 'ML').replace('M.G', 'MG').replace('G.M', 'GM')
-    s = re.sub(r'\b\d+\s*(ML|GM|MG|LTR|LT|KG)\b', ' ', s)
-    s = re.sub(r'(\d+)(ML|GM|MG|LTR|LT|KG)\b', ' ', s)
+
+    # 3. Remove MRP clauses e.g. MRP-150/-, MR-100, MRP 200
+    s = re.sub(r'\bMRP?\s*[-:]?\s*\d+.*', ' ', s)
+
+    # 4. Separate glued packaging, packs, units:
+    # e.g. 'SUSPEN30ML' -> 'SUSPEN 30ML', 'CAPSULE10X10' -> 'CAPSULE 10X10', 'A10X10' -> 'A 10X10'
+    s = re.sub(r'([A-Z])(\d+X\d+)', r'\1 \2', s)
+    s = re.sub(r'([A-Z])(\d+\s*(?:ML|GM|MG|LTR|LT|KG)\b)', r'\1 \2', s)
+    s = re.sub(r'(\d+M)(\d+ML)', r'\1 \2', s)
+    s = re.sub(r'\b(SUSP|SUSPEN|SUSPENSION|TAB|TABLET|CAP|CAPSU|CAPSUL|CAPSULE|SYP|SYRUP|OINT|CREAM|GEL|INJ|DROPS?|SOFTGEL)(\d+)', r'\1 \2', s)
+
+    # 5. Remove volume/weight quantities e.g. 200ML, 30 ML, 5 LTR, 170M
+    s = re.sub(r'\b\d+\s*(?:ML|GM|MG|LTR|LT|KG|M)\b', ' ', s)
+    s = re.sub(r'(\d+)(?:ML|GM|MG|LTR|LT|KG|M)\b', ' ', s)
+
+    # 6. Remove packaging prefixes/materials that get truncated: ALU-ALU, ALU, ALUMUNIAM, STRIP, STP, BLISTER
+    s = re.sub(r'\b(?:ALU\s*ALU|ALU|AL|ALUMUNIAM|ALUMINIUM|SILVER|GOLD|STRIP|STP|STR|BLISTER|BLIST)\b', ' ', s)
+
+    # 7. Replace non-alphanumeric with spaces
     s = re.sub(r'[^A-Z0-9]', ' ', s)
 
+    # 8. Comprehensive noise words: dosage forms, packaging types, materials, route
     noise = {
-        'TAB', 'TABLET', 'TABLETS', 'CAP', 'CAPSULE', 'CAPSULES',
-        'SYP', 'SYRUP', 'SUSP', 'SUSPEN', 'SUS', 'DROP', 'DROPS',
-        'OINT', 'CREAM', 'GEL', 'SOAP', 'INJ', 'INJECTION', 'LOTION',
-        'ML', 'GM', 'MG', 'LTR', 'LT', 'KG', 'PCS', 'BOX', 'BOTTLE'
+        'TAB', 'TABS', 'TABLET', 'TABLETS',
+        'CAP', 'CAPS', 'CAPSU', 'CAPSUL', 'CAPSULE', 'CAPSULES', 'SOFTGEL',
+        'SYP', 'SYRUP', 'SYRUPS',
+        'SUSP', 'SUSPEN', 'SUSPENSION', 'SUS',
+        'DROP', 'DROPS', 'DRP',
+        'OINT', 'OINTMENT', 'CREAM', 'GEL', 'SOAP',
+        'INJ', 'INJECTION', 'LOTION',
+        'ORAL', 'SOLUTION', 'SOLN', 'RESPULES', 'RESPULE', 'INHALER',
+        'POWDER', 'SACHET', 'SACHETS', 'BOLUS', 'BOLUSES',
+        # Packaging types & materials
+        'ALU', 'ALUALU', 'ALUMUNIAM', 'ALUMINIUM', 'STRIP', 'STRIPS', 'STR', 'STP',
+        'BLISTER', 'BLIST', 'BOTTLE', 'BTL', 'BOX', 'PCS', 'VIAL', 'AMPOULE', 'AMP',
+        'SILVER', 'GOLD', 'CONTAINER', 'PACK', 'PKG', 'PK',
+        # Units
+        'ML', 'GM', 'MG', 'LTR', 'LT', 'KG', 'MCG', 'IU', 'M',
+        # General non-distinctive / truncated fragments
+        'MR', 'MRP', 'A', 'S'
     }
 
     tokens = []
     for t in s.split():
         if t in noise:
             continue
-        if re.match(r'^\d+X\d+(X\d+)?$', t) or re.match(r'^\d+X\d+X\d+$', t):
+        if re.match(r'^\d+X\d+(X\d+)?$', t) or re.match(r'^\d+X\d+X\d+$', t) or re.match(r'^\d+X\d+$', t):
             continue
         tokens.append(t)
 
-    while len(tokens) > 1 and tokens[-1].isdigit():
-        if len(''.join(tokens[:-1])) >= 4:
-            tokens = tokens[:-1]
-        else:
-            break
+    # If the last token is just '1' (common MARG pack indicator e.g. 'MRP-150/- 1'), remove it if other tokens exist
+    if len(tokens) > 1 and tokens[-1] == '1':
+        tokens = tokens[:-1]
 
     res = ''.join(tokens)
     return res if res else re.sub(r'[^A-Z0-9]', '', str(name)).upper()
@@ -198,48 +253,98 @@ def parse_pack_size(val: Any) -> float:
 def parse_expiry_date(val: Any) -> datetime | None:
     """
     Parses various date/expiry formats common in MARG ERP:
-    - MM/YY, MM/YYYY (e.g. '11/26' -> 2026-11-01)
-    - MM-YY, MM-YYYY
-    - Mon-YY, Mon/YY, Mon-YYYY (e.g. 'Nov-26', 'DEC/2027' -> 2026-11-01)
-    - DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
+    - MM/YY, MM/YYYY, MM-YY, MM-YYYY, MM.YY, MM.YYYY (e.g. '04/26', '11/2026')
+    - Mon-YY, Mon-YYYY, Mon/YY, Mon/YYYY (e.g. 'Nov-26', 'MAY-2026', 'SEPT-25', 'JULY -2026')
+    - YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY
+    - Year alone (e.g. '2025', '2026')
     - Pandas Timestamp / datetime object
+    In pharmaceutical inventory (FEFO), expiry dates that specify a month and year
+    are valid through the LAST DAY of that month.
     """
     if val is None or pd.isna(val):
         return None
     if isinstance(val, (datetime, pd.Timestamp)):
-        return val.to_pydatetime() if hasattr(val, 'to_pydatetime') else val
+        dt = val.to_pydatetime() if hasattr(val, 'to_pydatetime') else val
+        # If it came in as 1st of month (standard Excel auto-parse for MM/YY), adjust to end of month
+        if dt.day == 1:
+            last_day = calendar.monthrange(dt.year, dt.month)[1]
+            return datetime(dt.year, dt.month, last_day, 23, 59, 59)
+        return dt
 
-    s = str(val).strip()
-    if not s or s.lower() in ('na', 'null', 'none', '-', '.'):
+    s = str(val).strip().upper()
+    if not s or s in ('NA', 'NULL', 'NONE', '-', '.', 'DEFAULT', '0', '0.0'):
         return None
 
-    # Pattern MM/YY or MM-YY (e.g., 08/26, 8/26, 6/27)
-    m = re.match(r'^(\d{1,2})[\/\-](\d{2})$', s)
+    # Strip prefixes like EXP:, EXP., EXP, BB:, B.B., E:
+    s = re.sub(r'^(?:EXP|EXPDT|EXPIRY|BB|B\.B\.|E)[\s\.:\-_]*', '', s).strip()
+
+    # 1. Full date YYYY-MM-DD
+    m = re.match(r'^(20\d{2})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})', s)
     if m:
-        month = int(m.group(1))
-        year = 2000 + int(m.group(2))
-        if 1 <= month <= 12:
-            return datetime(year, month, 1)
+        y, m_val, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= m_val <= 12:
+            max_d = calendar.monthrange(y, m_val)[1]
+            d = min(d, max_d)
+            if d == 1:
+                d = max_d
+            return datetime(y, m_val, d, 23, 59, 59)
 
-    # Pattern MM/YYYY or MM-YYYY
-    m = re.match(r'^(\d{1,2})[\/\-](\d{4})$', s)
+    # 2. Full date DD-MM-YYYY or DD/MM/YYYY
+    m = re.match(r'^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](20\d{2})', s)
     if m:
-        month = int(m.group(1))
-        year = int(m.group(2))
-        if 1 <= month <= 12:
-            return datetime(year, month, 1)
+        d, m_val, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= m_val <= 12:
+            max_d = calendar.monthrange(y, m_val)[1]
+            d = min(d, max_d)
+            return datetime(y, m_val, d, 23, 59, 59)
 
-    # Month name patterns: Nov-26, NOV/2026
-    for fmt in ('%b-%y', '%b/%y', '%b-%Y', '%b/%Y', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%d/%m/%y', '%Y/%m/%d'):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            pass
+    # 3. Month name and year (e.g. NOV-2025, MAY-26, SEPT-25, JULY -2026, JAN/2026, DEC 2027)
+    m = re.search(r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUNE|JUL|JULY|AUG|SEP|SEPT|SEPTEMBER|OCT|NOV|DEC)[A-Z]*\s*[\/\-\.\s]\s*(\d{2,4})\b', s)
+    if m:
+        m_str, y_str = m.group(1), m.group(2)
+        month = MONTH_NAME_MAP.get(m_str)
+        year = int(y_str)
+        if year < 100:
+            year += 2000
+        if month and 2000 <= year <= 2099:
+            last_day = calendar.monthrange(year, month)[1]
+            return datetime(year, month, last_day, 23, 59, 59)
 
+    # 4. MM/YY or MM/YYYY (e.g. 04/26, 11/2025, 4-26, 04.26)
+    m = re.match(r'^(\d{1,2})[\/\-\.](\d{2,4})$', s)
+    if m:
+        m_val = int(m.group(1))
+        y_val = int(m.group(2))
+        if y_val < 100:
+            y_val += 2000
+        if 1 <= m_val <= 12 and 2000 <= y_val <= 2099:
+            last_day = calendar.monthrange(y_val, m_val)[1]
+            return datetime(y_val, m_val, last_day, 23, 59, 59)
+
+    # 5. YYYY/MM (e.g. 2026/04, 2026-04)
+    m = re.match(r'^(20\d{2})[\/\-\.](\d{1,2})$', s)
+    if m:
+        y_val = int(m.group(1))
+        m_val = int(m.group(2))
+        if 1 <= m_val <= 12:
+            last_day = calendar.monthrange(y_val, m_val)[1]
+            return datetime(y_val, m_val, last_day, 23, 59, 59)
+
+    # 6. Year alone (e.g. 2025, 2026)
+    m = re.match(r'^(20\d{2})$', s)
+    if m:
+        year = int(m.group(1))
+        return datetime(year, 12, 31, 23, 59, 59)
+
+    # 7. Generic fallback
     try:
         dt = pd.to_datetime(s, errors='coerce')
         if pd.notna(dt):
-            return dt.to_pydatetime()
+            pdt = dt.to_pydatetime()
+            if pdt.day == 1:
+                ld = calendar.monthrange(pdt.year, pdt.month)[1]
+                return datetime(pdt.year, pdt.month, ld, 23, 59, 59)
+            return pdt
     except Exception:
         pass
 
@@ -747,6 +852,8 @@ class MargExcelParser:
             qty_on_order = _parse_float(row.get('qty_on_order'), 0.0)
             expiry_val = row.get('expiry_date')
             expiry_dt = parse_expiry_date(expiry_val)
+            if not expiry_dt and batch_no and batch_no != 'DEFAULT':
+                expiry_dt = parse_expiry_date(batch_no)
 
             out['inventory_batches'].append({
                 'product_code': code,

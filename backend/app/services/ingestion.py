@@ -75,7 +75,7 @@ class IngestionService:
         if clear_existing:
             purged_counts = self.purge_all_data()
 
-        parsed = MargExcelParser.parse_file(file_content)
+        parsed = MargExcelParser.parse_file(file_content, filename=filename)
 
         products_data = parsed['products']
         batches_data = parsed['inventory_batches']

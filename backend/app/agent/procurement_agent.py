@@ -45,9 +45,10 @@ class ProcurementAgent:
                 usable_before_expiry=inv['usable_before_expiry'],
                 near_expiry_qty=inv['near_expiry'], min_order_qty=product.min_order_qty,
                 pack_size=product.pack_size, unit_cost=unit_cost, expiry_risk=inv['expiry_risk'])
-            if calc['order_qty'] <= 0:
+            is_risk_alert = (calc['order_qty'] <= 0 and calc.get('expiry_action') in ('PAUSE_PROCUREMENT', 'REDUCE_ORDER'))
+            if calc['order_qty'] <= 0 and not is_risk_alert:
                 continue
-            guard = self.guardrails.validate_proposal(product, supplier, calc['order_qty'], unit_cost)
+            guard = self.guardrails.validate_proposal(product, supplier, calc['order_qty'], unit_cost, is_risk_alert=is_risk_alert)
             if not guard.allowed:
                 audit(self.db, 'PROPOSAL_BLOCKED', entity_type='product', entity_id=product.product_code,
                       details={'reasons': guard.reasons})

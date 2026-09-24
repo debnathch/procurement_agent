@@ -346,13 +346,19 @@ with tab_proposals:
     **You have full control to correct any value (quantity, supplier, notes) before approving.**
     """)
 
-    col_ref, col_filt, col_search = st.columns([1, 2, 3])
+    col_ref, col_filt, col_risk, col_search = st.columns([1, 1.5, 2, 2.5])
     with col_ref:
         if st.button("🔄 Refresh Data", key="refresh_proposals_btn"):
             st.rerun()
 
     with col_filt:
         status_filter = st.selectbox("Filter Status", ["PENDING", "APPROVED_PENDING_EXECUTION", "EXECUTED", "REJECTED", "ALL"])
+
+    with col_risk:
+        risk_filter = st.selectbox(
+            "Expiry Risk Filter",
+            ["All Risk Levels", "⚠️ Near-Expiry / Risk Products Only", "⛔ High Risk Only (PAUSE/REDUCE)"]
+        )
 
     # Fetch proposals
     current_proposals = []
@@ -372,6 +378,19 @@ with tab_proposals:
 
     # Filter out blacklisted non-medicine items
     current_proposals = [p for p in current_proposals if not is_excluded_product(p.get('product_name', ''))]
+
+    # Apply Expiry Risk Filter
+    if risk_filter == "⚠️ Near-Expiry / Risk Products Only":
+        current_proposals = [
+            p for p in current_proposals
+            if p.get('expiry_risk_score', 0) >= 0.25 or p.get('near_expiry_qty', 0) > 0
+        ]
+    elif risk_filter == "⛔ High Risk Only (PAUSE/REDUCE)":
+        current_proposals = [
+            p for p in current_proposals
+            if p.get('expiry_risk_score', 0) >= 0.50
+        ]
+
     # Sort alphabetically by product name (A-Z)
     current_proposals.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
 
@@ -664,11 +683,65 @@ with tab_inventory:
                 df_inv = df_inv[~df_inv['product_name'].apply(is_excluded_product)]
                 df_inv = df_inv.sort_values(by='product_name', ascending=True)
 
-                col_srch, col_cnt = st.columns([3, 1])
+                # Compute FEFO Expiry Status for every batch
+                now_dt = datetime.utcnow()
+                horizon_days = int(settings.expiry_risk_horizon_days if settings else 180)
+                horizon_dt = now_dt + timedelta(days=horizon_days)
+
+                def calc_batch_fefo(exp_val):
+                    if not exp_val or pd.isna(exp_val):
+                        return "Unknown / General"
+                    try:
+                        exp_dt = pd.to_datetime(exp_val)
+                        if exp_dt <= now_dt:
+                            return "⛔ Expired"
+                        elif exp_dt <= horizon_dt:
+                            return f"⚠️ Near-Expiry (≤ {horizon_days}d)"
+                        else:
+                            return "✅ Shelf-Life Healthy"
+                    except Exception:
+                        return "Unknown"
+
+                df_inv['FEFO Status'] = df_inv['expiry_date'].apply(calc_batch_fefo)
+
+                # Format Expiry Date cleanly for display (YYYY-MM-DD or MM/YYYY)
+                def format_exp_date(exp_val):
+                    if not exp_val or pd.isna(exp_val):
+                        return "N/A"
+                    try:
+                        exp_dt = pd.to_datetime(exp_val)
+                        return exp_dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        return str(exp_val)
+
+                df_inv['Formatted Expiry'] = df_inv['expiry_date'].apply(format_exp_date)
+
+                cnt_total = len(df_inv)
+                cnt_near = (df_inv['FEFO Status'].str.startswith("⚠️")).sum()
+                cnt_exp = (df_inv['FEFO Status'] == "⛔ Expired").sum()
+                cnt_healthy = (df_inv['FEFO Status'] == "✅ Shelf-Life Healthy").sum()
+
+                col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+                col_f1.metric("Total Tracked Batches", cnt_total)
+                col_f2.metric("Near-Expiry Batches", int(cnt_near))
+                col_f3.metric("Expired Batches", int(cnt_exp))
+                col_f4.metric("Healthy Shelf-Life", int(cnt_healthy))
+
+                col_srch, col_filt_fefo = st.columns([2, 1])
                 with col_srch:
                     search_query = st.text_input("🔍 Search by Product Name or Batch No", "", key="inv_search")
-                with col_cnt:
-                    st.metric("Total Batches", len(df_inv))
+                with col_filt_fefo:
+                    fefo_filter = st.selectbox(
+                        "FEFO Expiry Filter",
+                        ["All Batches", "⚠️ Near-Expiry & Expired Only", "⚠️ Near-Expiry Only", "⛔ Expired Only"]
+                    )
+
+                if fefo_filter == "⚠️ Near-Expiry & Expired Only":
+                    df_inv = df_inv[df_inv['FEFO Status'].str.startswith(("⚠️", "⛔"))]
+                elif fefo_filter == "⚠️ Near-Expiry Only":
+                    df_inv = df_inv[df_inv['FEFO Status'].str.startswith("⚠️")]
+                elif fefo_filter == "⛔ Expired Only":
+                    df_inv = df_inv[df_inv['FEFO Status'] == "⛔ Expired"]
 
                 if search_query:
                     mask = (
@@ -681,14 +754,15 @@ with tab_inventory:
                 cols_to_display = ['product_name']
                 if 'category' in df_inv.columns:
                     cols_to_display.append('category')
-                cols_to_display.extend(['batch_no', 'expiry_date', 'qty_on_hand', 'qty_on_order', 'unit_cost'])
+                cols_to_display.extend(['batch_no', 'Formatted Expiry', 'FEFO Status', 'qty_on_hand', 'qty_on_order', 'unit_cost'])
                 cols_to_display = [c for c in cols_to_display if c in df_inv.columns]
 
                 df_display = df_inv[cols_to_display].rename(columns={
                     'product_name': 'Product Name',
                     'category': 'Category',
                     'batch_no': 'Batch No',
-                    'expiry_date': 'Expiry Date',
+                    'Formatted Expiry': 'Expiry Date',
+                    'FEFO Status': 'FEFO Shelf-Life Status',
                     'qty_on_hand': 'On Hand',
                     'qty_on_order': 'On Order',
                     'unit_cost': 'Cost Price (₹)'
