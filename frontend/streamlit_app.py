@@ -112,7 +112,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("""
 ### 🛡️ Guardrails & Safety
 - **Mode**: Dry-Run (No MARG PO without review)
-- **FEFO Awareness**: 90-day expiry horizon
+- **FEFO Awareness**: 180-day expiry horizon
 - **Pack Multiples**: Automatically preserved
 - **Supplier Override**: Enabled for reviewers
 """)
@@ -131,6 +131,7 @@ config_review_days = st.sidebar.number_input("Review Cycle (Days)", min_value=1,
 config_safety_days = st.sidebar.number_input("Safety Buffer (Days)", min_value=0, max_value=30, value=3, step=1)
 total_coverage = int(config_lead_time + config_review_days + config_safety_days)
 st.sidebar.info(f"📊 Total Target Coverage: **{total_coverage} days** ({int(config_lead_time)}d lead + {int(config_review_days)}d review + {int(config_safety_days)}d safety)")
+st.sidebar.caption("🛡️ **FEFO Expiry Horizon**: 180 days (batches expiring within 6 months flagged)")
 
 # Title & Header
 st.markdown('<div class="main-header">💊 MARG Procurement Copilot</div>', unsafe_allow_html=True)

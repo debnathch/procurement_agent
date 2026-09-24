@@ -33,6 +33,32 @@ class DemandService:
             avg_daily = total_sold / lookback_days
             return round(avg_daily, 4), f'sales_history_{lookback_days}d'
 
+        # Fallback 0: Check sales history across canonical product name variants
+        from backend.app.adapters.excel import canonical_medicine_key
+        prod = self.db.get(Product, product_code)
+        if prod:
+            c_key = canonical_medicine_key(prod.product_name)
+            all_prods = self.db.scalars(select(Product)).all()
+            alt_codes = [
+                p.product_code for p in all_prods
+                if canonical_medicine_key(p.product_name) == c_key and p.product_code != product_code
+            ]
+            if alt_codes:
+                alt_res = self.db.execute(
+                    select(
+                        func.sum(SalesHistory.qty_sold).label('total_sold'),
+                        func.count(SalesHistory.sale_date.distinct()).label('days_with_sales'),
+                    ).where(
+                        SalesHistory.product_code.in_(alt_codes),
+                        SalesHistory.sale_date >= cutoff,
+                    )
+                ).one()
+                alt_total = alt_res.total_sold or 0.0
+                alt_days = alt_res.days_with_sales or 0
+                if alt_total > 0 and alt_days > 0:
+                    avg_daily = alt_total / lookback_days
+                    return round(avg_daily, 4), f'sales_history_{lookback_days}d'
+
         # Fallback 1: estimate daily demand from reorder_point / 30 if available
         product = self.db.get(Product, product_code)
         if product and product.reorder_point and product.reorder_point > 0:

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Policy defaults
     default_review_days: int = 7
     default_safety_days: int = 3
-    expiry_risk_horizon_days: int = 90
+    expiry_risk_horizon_days: int = 180
     default_lead_time_days: int = 45
 
     # MARG integration (disabled by default)

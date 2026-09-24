@@ -19,6 +19,7 @@ Handles MARG-specific nuances:
 from __future__ import annotations
 import io
 import re
+import hashlib
 from datetime import datetime, timedelta
 from typing import Any
 import pandas as pd
@@ -96,10 +97,32 @@ def _clean_str(val: Any) -> str:
     return ' '.join(str(val).split())
 
 
+def canonical_medicine_key(name: str) -> str:
+    """
+    Extracts the canonical medicine key by normalizing spacing, punctuation,
+    dosage forms, and packing multiples across MARG reports.
+    E.g. 'AC-PLUS TABLET 10X2X10' and 'AC-PLUS TABLET' both yield 'ACPLUS'.
+    """
+    s = re.sub(r'[^a-zA-Z0-9]', ' ', str(name)).upper()
+    noise = {
+        'TAB', 'TABLET', 'TABLETS', 'CAP', 'CAPSULE', 'CAPSULES',
+        'SYP', 'SYRUP', 'SUSP', 'SUSPEN', 'SUS', 'DROP', 'DROPS',
+        'OINT', 'CREAM', 'GEL', 'SOAP', 'INJ', 'INJECTION', 'LOTION',
+        'ML', 'GM', 'MG', 'LTR', 'LT'
+    }
+    tokens = [
+        t for t in s.split()
+        if t not in noise and not re.match(r'^\d+X\d+(X\d+)?$', t) and not re.match(r'^\d+X\d+X\d+$', t)
+    ]
+    res = ''.join(tokens)
+    return res if res else re.sub(r'[^a-zA-Z0-9]', '', str(name)).upper()
+
+
 def _make_stable_code(name: str) -> str:
-    """Generates a stable product code from normalized product name so stock and sales match 100%."""
-    cleaned = _clean_alpha(name)
-    return f"MED-{abs(hash(cleaned)) % 100000:05d}"
+    """Generates a stable, deterministic product code from canonical medicine name so stock and sales match 100%."""
+    canonical = canonical_medicine_key(name)
+    h = int(hashlib.md5(canonical.encode('utf-8')).hexdigest()[:8], 16)
+    return f"MED-{h % 100000:05d}"
 
 
 def _parse_float(val: Any, default: float = 0.0) -> float:
