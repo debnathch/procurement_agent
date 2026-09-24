@@ -16,6 +16,11 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 
+try:
+    from backend.app.core.config import settings
+except ImportError:
+    settings = None
+
 # Page config
 st.set_page_config(
     page_title="MARG Procurement Agent",
@@ -576,7 +581,8 @@ with tab_approved:
         col_ap1, col_ap2, col_ap3 = st.columns(3)
         col_ap1.metric("Total Approved Orders", len(approved_proposals))
         col_ap2.metric("Total Order Value", f"₹{total_po_val:,.2f}")
-        col_ap3.metric("Execution Mode", settings.execution_mode.upper())
+        exec_mode = getattr(settings, 'execution_mode', 'DRY_RUN').upper() if settings else 'DRY_RUN'
+        col_ap3.metric("Execution Mode", exec_mode)
 
         df_approved = pd.DataFrame([
             {
