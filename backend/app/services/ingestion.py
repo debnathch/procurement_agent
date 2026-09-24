@@ -2,7 +2,7 @@
 MARG Excel Ingestion Service
 
 Takes parsed data structures from MargExcelParser and commits them to the database.
-Handles upserting Products, Suppliers, InventoryBatches, and SalesHistory.
+Handles upserting Products, Suppliers, InventoryBatches, and SalesHistory with foreign key integrity.
 """
 from typing import Any
 from sqlalchemy.orm import Session
@@ -18,7 +18,7 @@ class IngestionService:
 
     def ingest_excel(self, file_content: bytes, filename: str = 'marg_export.xlsx') -> dict[str, Any]:
         """
-        Parses MARG Excel and updates products, inventory batches, suppliers, and sales history.
+        Parses MARG Excel / CSV and updates products, inventory batches, suppliers, and sales history.
         """
         parsed = MargExcelParser.parse_file(file_content)
 
@@ -60,17 +60,41 @@ class IngestionService:
         self.db.flush()
 
         # 3. Replace Inventory Batches for the updated products to maintain fresh stock position
-        product_codes = [p['product_code'] for p in products_data]
-        if product_codes:
+        batch_product_codes = list({b['product_code'] for b in batches_data})
+        if batch_product_codes:
+            for p_code in batch_product_codes:
+                if not self.db.get(Product, p_code):
+                    self.db.add(Product(
+                        product_code=p_code,
+                        product_name=p_code,
+                        category='General',
+                        unit='unit',
+                        pack_size=1.0,
+                        unit_cost=0.0,
+                    ))
+            self.db.flush()
+
             self.db.execute(
-                delete(InventoryBatch).where(InventoryBatch.product_code.in_(product_codes))
+                delete(InventoryBatch).where(InventoryBatch.product_code.in_(batch_product_codes))
             )
             for b_data in batches_data:
                 self.db.add(InventoryBatch(**b_data))
                 stats['batches_inserted'] += 1
 
-        # 4. Insert Sales History if present
+        # 4. Insert Sales History if present (ensure product exists for foreign key constraint)
         for s_data in sales_data:
+            p_code = s_data['product_code']
+            if not self.db.get(Product, p_code):
+                self.db.add(Product(
+                    product_code=p_code,
+                    product_name=p_code,
+                    category='Imported Demand',
+                    unit='unit',
+                    pack_size=1.0,
+                    unit_cost=0.0,
+                ))
+                self.db.flush()
+
             self.db.add(SalesHistory(**s_data))
             stats['sales_inserted'] += 1
 

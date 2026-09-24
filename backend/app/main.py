@@ -296,10 +296,11 @@ async def upload_marg_excel(
     Ingests Products, Inventory Batches, Expiries, Suppliers, and Sales History.
     If run_agent is True, immediately computes procurement recommendations!
     """
-    if not (file.filename.endswith('.xlsx') or file.filename.endswith('.xls')):
+    filename_lower = file.filename.lower()
+    if not (filename_lower.endswith('.xlsx') or filename_lower.endswith('.xls') or filename_lower.endswith('.csv')):
         raise HTTPException(
             status_code=400,
-            detail='Invalid file format. Please upload a MARG Excel file (.xlsx or .xls).'
+            detail='Invalid file format. Please upload a MARG export file (.xlsx, .xls, or .csv).'
         )
 
     content = await file.read()

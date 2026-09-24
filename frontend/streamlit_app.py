@@ -211,10 +211,10 @@ with tab_upload:
 
     with col_up1:
         uploaded_files = st.file_uploader(
-            "Select MARG Excel file(s) (.xlsx or .xls) — You can select multiple files at once!",
-            type=["xlsx", "xls"],
+            "Select MARG Export file(s) (.xlsx, .xls, or .csv) — You can select multiple files at once!",
+            type=["xlsx", "xls", "csv"],
             accept_multiple_files=True,
-            help="Tip: You can select and upload both 'Closing Stock with Expiry' and 'Sales Summary' together!"
+            help="Upload raw MARG ERP exports directly without reformatting (Closing Stock, Manufacturer List, PCD Outstanding, etc.)"
         )
 
         auto_run = st.checkbox("Automatically run Procurement Agent after ingestion", value=True)
@@ -222,13 +222,18 @@ with tab_upload:
         if uploaded_files:
             st.success(f"📁 Loaded **{len(uploaded_files)}** file(s): `{'`, `'.join([f.name for f in uploaded_files])}`")
 
-            # Preview the excel sheets for each file
+            # Preview each file
             for f in uploaded_files:
                 try:
-                    xl = pd.ExcelFile(f)
-                    with st.expander(f"👀 Preview '{f.name}' (Sheets: {', '.join(xl.sheet_names)})", expanded=(len(uploaded_files) == 1)):
-                        df_preview = xl.parse(xl.sheet_names[0], nrows=5)
-                        st.dataframe(df_preview, use_container_width=True)
+                    if f.name.lower().endswith('.csv'):
+                        df_preview = pd.read_csv(f, nrows=5)
+                        with st.expander(f"👀 Preview '{f.name}' (CSV Format)", expanded=(len(uploaded_files) == 1)):
+                            st.dataframe(df_preview, use_container_width=True)
+                    else:
+                        xl = pd.ExcelFile(f)
+                        with st.expander(f"👀 Preview '{f.name}' (Sheets: {', '.join(xl.sheet_names)})", expanded=(len(uploaded_files) == 1)):
+                            df_preview = xl.parse(xl.sheet_names[0], nrows=5)
+                            st.dataframe(df_preview, use_container_width=True)
                 except Exception as e:
                     st.warning(f"Preview note for {f.name}: {e}")
 
