@@ -524,17 +524,44 @@ with tab_inventory:
             inv_res = requests.get(f"{BACKEND_URL}/inventory", timeout=5)
             if inv_res.status_code == 200 and inv_res.json():
                 df_inv = pd.DataFrame(inv_res.json())
-                st.dataframe(
-                    df_inv.rename(columns={
-                        'product_code': 'Item Code',
-                        'batch_no': 'Batch No',
-                        'qty_on_hand': 'On Hand',
-                        'qty_on_order': 'On Order',
-                        'expiry_date': 'Expiry Date',
-                        'unit_cost': 'Cost Price (₹)'
-                    }),
-                    use_container_width=True
-                )
+
+                # Ensure product_name is available, fallback to product_code if empty
+                if 'product_name' not in df_inv.columns:
+                    df_inv['product_name'] = df_inv.get('product_code', '')
+                else:
+                    df_inv['product_name'] = df_inv['product_name'].fillna(df_inv.get('product_code', ''))
+
+                col_srch, col_cnt = st.columns([3, 1])
+                with col_srch:
+                    search_query = st.text_input("🔍 Search by Product Name or Batch No", "", key="inv_search")
+                with col_cnt:
+                    st.metric("Total Batches", len(df_inv))
+
+                if search_query:
+                    mask = (
+                        df_inv['product_name'].astype(str).str.contains(search_query, case=False, na=False) |
+                        df_inv['batch_no'].astype(str).str.contains(search_query, case=False, na=False)
+                    )
+                    df_inv = df_inv[mask]
+
+                # Product Name in place of Item Code
+                cols_to_display = ['product_name']
+                if 'category' in df_inv.columns:
+                    cols_to_display.append('category')
+                cols_to_display.extend(['batch_no', 'expiry_date', 'qty_on_hand', 'qty_on_order', 'unit_cost'])
+                cols_to_display = [c for c in cols_to_display if c in df_inv.columns]
+
+                df_display = df_inv[cols_to_display].rename(columns={
+                    'product_name': 'Product Name',
+                    'category': 'Category',
+                    'batch_no': 'Batch No',
+                    'expiry_date': 'Expiry Date',
+                    'qty_on_hand': 'On Hand',
+                    'qty_on_order': 'On Order',
+                    'unit_cost': 'Cost Price (₹)'
+                })
+
+                st.dataframe(df_display, use_container_width=True)
             else:
                 st.info("No inventory batches in database yet. Please upload a MARG Excel file.")
         except Exception as e:

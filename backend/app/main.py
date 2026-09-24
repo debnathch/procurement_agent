@@ -255,18 +255,25 @@ def list_audit(limit: int = 100, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @app.get('/inventory', tags=['inventory'])
 def list_inventory(db: Session = Depends(get_db)):
-    batches = db.scalars(select(InventoryBatch).order_by(InventoryBatch.product_code)).all()
+    query = (
+        select(InventoryBatch, Product.product_name, Product.category)
+        .outerjoin(Product, InventoryBatch.product_code == Product.product_code)
+        .order_by(Product.product_name, InventoryBatch.batch_no)
+    )
+    rows = db.execute(query).all()
     return [
         {
             'id': b.id,
             'product_code': b.product_code,
+            'product_name': product_name or b.product_code,
+            'category': category or 'General',
             'batch_no': b.batch_no,
             'qty_on_hand': b.qty_on_hand,
             'qty_on_order': b.qty_on_order,
             'expiry_date': b.expiry_date.strftime('%Y-%m-%d') if b.expiry_date else None,
             'unit_cost': b.unit_cost,
         }
-        for b in batches
+        for b, product_name, category in rows
     ]
 
 
