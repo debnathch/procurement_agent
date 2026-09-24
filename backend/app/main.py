@@ -3,6 +3,7 @@ FastAPI application entry point for the MARG Procurement Agent.
 
 Startup: creates all SQLite tables automatically (no manual DB setup needed).
 """
+import logging
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse, Response
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
+from pathlib import Path
 
 from backend.app.core.config import settings
 from backend.app.core.database import get_db, init_db
@@ -21,6 +23,9 @@ from backend.app.agent.procurement_agent import ProcurementAgent
 from backend.app.services.feedback import ProposalService
 from backend.app.services.ingestion import IngestionService
 from backend.app.adapters.excel import create_sample_marg_excel
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("procurement_agent")
 
 # ---------------------------------------------------------------------------
 # App lifecycle
@@ -300,9 +305,12 @@ async def upload_marg_excel(
     content = await file.read()
     ingestion_service = IngestionService(db)
 
+    logger.info("Received file upload: %s (%s bytes)", file.filename, len(content) if 'content' in locals() else 0)
     try:
         stats = ingestion_service.ingest_excel(content, filename=file.filename)
+        logger.info("Ingestion completed for %s: %s", file.filename, stats)
     except Exception as exc:
+        logger.error("Failed to parse MARG Excel %s: %s", file.filename, exc, exc_info=True)
         raise HTTPException(status_code=400, detail=f'Failed to parse MARG Excel: {exc}')
 
     response_data = {
@@ -323,4 +331,27 @@ async def upload_marg_excel(
         response_data['proposals'] = [_proposal_dict(p) for p in proposals]
 
     return response_data
+
+
+# ---------------------------------------------------------------------------
+# Live Rolling Logs
+# ---------------------------------------------------------------------------
+@app.get('/system/logs', tags=['system'])
+def get_system_logs(lines: int = 100):
+    """Returns recent log lines from the running service."""
+    log_candidates = [
+        "/Users/debz/.gemini/antigravity-ide/brain/3aff40a2-008c-4545-841e-136020632ad6/.system_generated/tasks/task-72.log"
+    ]
+    for p in log_candidates:
+        fpath = Path(p)
+        if fpath.exists():
+            with fpath.open('r', encoding='utf-8', errors='replace') as f:
+                all_lines = f.readlines()
+                return {
+                    "source": str(fpath),
+                    "total_lines": len(all_lines),
+                    "lines": all_lines[-lines:],
+                }
+    return {"lines": [], "message": "Log file not found."}
+
 

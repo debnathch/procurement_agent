@@ -14,6 +14,7 @@ import io
 import requests
 import streamlit as st
 import pandas as pd
+from pathlib import Path
 
 # Page config
 st.set_page_config(
@@ -168,12 +169,13 @@ with col_m4:
 st.markdown("---")
 
 # Main Tabs
-tab_upload, tab_proposals, tab_approved, tab_inventory, tab_audit = st.tabs([
+tab_upload, tab_proposals, tab_approved, tab_inventory, tab_audit, tab_logs = st.tabs([
     "📂 Upload MARG Excel & Run",
     "💡 Review & Correct Suggestions",
     "📦 Approved Orders / PO Export",
     "📊 Inventory & FEFO Expiry",
-    "📜 Compliance Audit Log"
+    "📜 Compliance Audit Log",
+    "📋 Live Rolling Logs"
 ])
 
 # ---------------------------------------------------------------------------
@@ -552,3 +554,42 @@ with tab_audit:
                 st.info("No audit logs recorded yet.")
         except Exception as e:
             st.error(f"Error fetching audit trail: {e}")
+
+
+# ---------------------------------------------------------------------------
+# TAB 6: Live Application Rolling Logs
+# ---------------------------------------------------------------------------
+with tab_logs:
+    st.subheader("6. Live Application Rolling Logs")
+    st.caption("Inspect live streaming logs from the FastAPI backend and Streamlit UI services.")
+
+    col_l1, col_l2 = st.columns([1, 4])
+    with col_l1:
+        log_source = st.radio("Log Source", ["FastAPI Backend (Port 8000)", "Streamlit UI (Port 8501)"])
+        num_lines = st.slider("Lines to Tail", min_value=20, max_value=300, value=80, step=20)
+        if st.button("🔄 Refresh Logs", use_container_width=True):
+            st.rerun()
+
+    with col_l2:
+        if "FastAPI" in log_source:
+            log_file = Path("/Users/debz/.gemini/antigravity-ide/brain/3aff40a2-008c-4545-841e-136020632ad6/.system_generated/tasks/task-72.log")
+        else:
+            log_file = Path("/Users/debz/.gemini/antigravity-ide/brain/3aff40a2-008c-4545-841e-136020632ad6/.system_generated/tasks/task-151.log")
+
+        if log_file.exists():
+            with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                content_lines = f.readlines()
+            total_cnt = len(content_lines)
+            st.info(f"📄 Showing last **{min(num_lines, total_cnt)}** of **{total_cnt}** lines from `{log_file.name}`")
+            tail_lines = "".join(content_lines[-num_lines:])
+            st.code(tail_lines, language="log")
+
+            st.download_button(
+                label=f"📥 Download Complete {log_source} Log",
+                data="".join(content_lines),
+                file_name=f"{log_source.lower().split()[0]}_rolling.log",
+                mime="text/plain",
+                use_container_width=True
+            )
+        else:
+            st.warning(f"Log file not found at: `{log_file}`")
