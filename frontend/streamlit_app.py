@@ -215,34 +215,6 @@ with tab_upload:
     - **Suppliers & Lead Times**
     """)
 
-    # Live Procurement Overview in Tab 1
-    st.markdown("##### 📌 Current Procurement Status")
-    col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-    with col_t1:
-        st.metric("Pending Orders for Review", len(pending))
-    with col_t2:
-        st.metric("Proposed Purchase Value", f"₹{total_pending_val:,.2f}")
-    with col_t3:
-        st.metric("Expiry Risk Alerts", high_expiry_items)
-    with col_t4:
-        st.metric("Approved Orders", len(approved))
-
-    if 'upload_summary' in st.session_state:
-        summary = st.session_state['upload_summary']
-        if st.session_state.pop('just_uploaded', False):
-            st.balloons()
-        st.success(f"🎉 **Ingestion & Analysis Complete!** Processed {summary.get('files_count', 1)} MARG file(s). **{len(pending)}** pending orders for review totaling **₹{total_pending_val:,.2f}**.")
-        with st.expander("📊 Detailed Ingestion Statistics", expanded=True):
-            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-            stats = summary.get('stats', {})
-            col_s1.metric("Products Updated", stats.get('products_upserted', 0))
-            col_s2.metric("Batches Recorded", stats.get('batches_inserted', 0))
-            col_s3.metric("Suppliers Updated", stats.get('suppliers_upserted', 0))
-            col_s4.metric("Sales Rows Imported", stats.get('sales_inserted', 0))
-        st.info("👉 Switch to the **'Review & Correct Suggestions'** tab to review, adjust, and approve order suggestions!")
-
-    st.markdown("---")
-
     col_up1, col_up2 = st.columns([2, 1])
 
     with col_up2:
@@ -268,8 +240,6 @@ with tab_upload:
             try:
                 p_res = requests.post(f"{BACKEND_URL}/system/reset-db", timeout=10)
                 if p_res.status_code == 200:
-                    st.session_state.pop('upload_summary', None)
-                    st.session_state.pop('just_uploaded', None)
                     st.success("✅ Database purged completely! Historical data cleared.")
                     st.rerun()
                 else:
@@ -349,18 +319,21 @@ with tab_upload:
                                     if should_run_agent and res_json.get('agent_run'):
                                         agent_run = res_json['agent_run']
                                         num_proposals = agent_run.get('proposals_count', 0)
+                                        st.balloons()
+                                        st.success(f"🎉 **Ingestion & Analysis Complete!** Generated **{num_proposals}** procurement recommendations across {success_files} file(s).")
                                 else:
                                     st.error(f"Upload failed for {f.name}: {upload_res.text}")
                             except Exception as exc:
                                 st.error(f"Error processing {f.name}: {exc}")
 
                         if success_files > 0:
-                            st.session_state['upload_summary'] = {
-                                'files_count': success_files,
-                                'stats': cumulative_stats
-                            }
-                            st.session_state['just_uploaded'] = True
-                            st.rerun()
+                            st.success(f"✅ Ingested {success_files} file(s) into database:")
+                            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                            col_s1.metric("Products Updated", cumulative_stats['products_upserted'])
+                            col_s2.metric("Batches Recorded", cumulative_stats['batches_inserted'])
+                            col_s3.metric("Suppliers Updated", cumulative_stats['suppliers_upserted'])
+                            col_s4.metric("Sales Rows Imported", cumulative_stats['sales_inserted'])
+                            st.info("👉 Switch to the **'Review & Correct Suggestions'** tab to review, adjust, and approve order suggestions!")
 
 
 # ---------------------------------------------------------------------------
