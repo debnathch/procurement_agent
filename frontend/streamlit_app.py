@@ -511,10 +511,11 @@ with tab_proposals:
 
                     with col_edit1:
                         # Correct quantity
+                        init_qty = max(0.0, float(p.get('recommended_qty', 0.0)))
                         corrected_qty = st.number_input(
                             f"Order Quantity (Suggested: {p['recommended_qty']:g})",
-                            min_value=1.0,
-                            value=float(p['recommended_qty']),
+                            min_value=0.0,
+                            value=init_qty,
                             step=1.0,
                             key=f"qty_input_{p_id}"
                         )
