@@ -209,6 +209,20 @@ with tab_upload:
             except Exception as e:
                 st.warning(f"Could not fetch sample template: {e}")
 
+        st.markdown("---")
+        st.write("##### 🗑️ Database Management")
+        st.caption("Clean-slate mode: Wipe previous database records at any time before a new run.")
+        if st.button("Purge & Wipe Database Now", type="secondary", use_container_width=True, help="Wipes all inventory, sales, suppliers, and proposals to start 100% clean"):
+            try:
+                p_res = requests.post(f"{BACKEND_URL}/system/reset-db", timeout=10)
+                if p_res.status_code == 200:
+                    st.success("✅ Database purged completely! Historical data cleared.")
+                    st.rerun()
+                else:
+                    st.error(f"Error resetting database: {p_res.text}")
+            except Exception as e:
+                st.error(f"Reset error: {e}")
+
     with col_up1:
         uploaded_files = st.file_uploader(
             "Select MARG Export file(s) (.xlsx, .xls, or .csv) — You can select multiple files at once!",
@@ -217,7 +231,15 @@ with tab_upload:
             help="Upload raw MARG ERP exports directly without reformatting (Closing Stock, Manufacturer List, PCD Outstanding, etc.)"
         )
 
-        auto_run = st.checkbox("Automatically run Procurement Agent after ingestion", value=True)
+        col_opt1, col_opt2 = st.columns([1, 1])
+        with col_opt1:
+            auto_run = st.checkbox("Automatically run Procurement Agent after ingestion", value=True)
+        with col_opt2:
+            clear_db_first = st.checkbox(
+                "🧹 Refresh Database (wipe old data before import)",
+                value=True,
+                help="Recommended: Clears all existing products, inventory batches, suppliers, and past suggestions so only the fresh data remains in the database."
+            )
 
         if uploaded_files:
             st.success(f"📁 Loaded **{len(uploaded_files)}** file(s): `{'`, `'.join([f.name for f in uploaded_files])}`")
@@ -251,14 +273,15 @@ with tab_upload:
                         success_files = 0
 
                         for idx, f in enumerate(uploaded_files):
-                            # Run agent on last file only if auto_run is checked
+                            is_first = (idx == 0)
                             is_last = (idx == len(uploaded_files) - 1)
                             should_run_agent = (auto_run and is_last)
+                            should_clear = (clear_db_first and is_first)
 
                             files = {'file': (f.name, f.getvalue(), f.type)}
                             try:
                                 upload_res = requests.post(
-                                    f"{BACKEND_URL}/ingestion/upload-marg-excel?run_agent={'true' if should_run_agent else 'false'}&lead_time_days={int(config_lead_time)}",
+                                    f"{BACKEND_URL}/ingestion/upload-marg-excel?run_agent={'true' if should_run_agent else 'false'}&lead_time_days={int(config_lead_time)}&clear_existing={'true' if should_clear else 'false'}",
                                     files=files,
                                     timeout=60
                                 )

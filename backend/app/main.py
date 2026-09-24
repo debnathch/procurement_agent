@@ -296,11 +296,13 @@ async def upload_marg_excel(
     file: UploadFile = File(...),
     run_agent: bool = Query(True, description='Automatically run procurement agent after ingestion'),
     lead_time_days: Optional[int] = Query(None, description='Configurable lead time override in days'),
+    clear_existing: bool = Query(True, description='Clear all previous database records before ingesting fresh data'),
     db: Session = Depends(get_db)
 ):
     """
-    Upload a MARG Excel file (.xlsx or .xls).
+    Upload a MARG Excel file (.xlsx or .xls) or CSV.
     Ingests Products, Inventory Batches, Expiries, Suppliers, and Sales History.
+    If clear_existing is True (default), completely purges stale historical data.
     If run_agent is True, immediately computes procurement recommendations!
     """
     filename_lower = file.filename.lower()
@@ -313,9 +315,14 @@ async def upload_marg_excel(
     content = await file.read()
     ingestion_service = IngestionService(db)
 
-    logger.info("Received file upload: %s (%s bytes)", file.filename, len(content) if 'content' in locals() else 0)
+    logger.info(
+        "Received file upload: %s (%s bytes), clear_existing=%s",
+        file.filename,
+        len(content) if 'content' in locals() else 0,
+        clear_existing
+    )
     try:
-        stats = ingestion_service.ingest_excel(content, filename=file.filename)
+        stats = ingestion_service.ingest_excel(content, filename=file.filename, clear_existing=clear_existing)
         logger.info("Ingestion completed for %s: %s", file.filename, stats)
     except Exception as exc:
         logger.error("Failed to parse MARG Excel %s: %s", file.filename, exc, exc_info=True)
@@ -339,6 +346,21 @@ async def upload_marg_excel(
         response_data['proposals'] = [_proposal_dict(p) for p in proposals]
 
     return response_data
+
+
+@app.post('/system/reset-db', tags=['system'])
+def reset_database(db: Session = Depends(get_db)):
+    """
+    Wipes all operational data from the database:
+    Products, Suppliers, Inventory Batches, Sales History, Procurement Runs, Proposals, Feedback.
+    """
+    ingestion_service = IngestionService(db)
+    purged_stats = ingestion_service.purge_all_data()
+    return {
+        'status': 'success',
+        'message': 'Database completely purged. Ready for fresh import.',
+        'purged': purged_stats,
+    }
 
 
 # ---------------------------------------------------------------------------

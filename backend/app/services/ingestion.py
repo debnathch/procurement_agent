@@ -2,12 +2,16 @@
 MARG Excel Ingestion Service
 
 Takes parsed data structures from MargExcelParser and commits them to the database.
-Handles upserting Products, Suppliers, InventoryBatches, and SalesHistory with foreign key integrity.
+Handles database purge on fresh uploads, and upserts Products, Suppliers,
+InventoryBatches, and SalesHistory with foreign key integrity.
 """
 from typing import Any
 from sqlalchemy.orm import Session
 from sqlalchemy import delete
-from backend.app.models.entities import Product, Supplier, InventoryBatch, SalesHistory
+from backend.app.models.entities import (
+    Product, Supplier, InventoryBatch, SalesHistory,
+    ProcurementRun, ProcurementProposal, FeedbackEvent
+)
 from backend.app.services.audit import audit
 from backend.app.adapters.excel import MargExcelParser
 
@@ -16,10 +20,61 @@ class IngestionService:
     def __init__(self, db: Session):
         self.db = db
 
-    def ingest_excel(self, file_content: bytes, filename: str = 'marg_export.xlsx') -> dict[str, Any]:
+    def purge_all_data(self) -> dict[str, int]:
+        """
+        Clears all operational procurement data:
+        FeedbackEvent, ProcurementProposal, ProcurementRun,
+        InventoryBatch, SalesHistory, Product, Supplier.
+        Ensures a completely fresh start for newly uploaded data.
+        """
+        del_fb = self.db.execute(delete(FeedbackEvent)).rowcount
+        del_prop = self.db.execute(delete(ProcurementProposal)).rowcount
+        del_runs = self.db.execute(delete(ProcurementRun)).rowcount
+        del_batch = self.db.execute(delete(InventoryBatch)).rowcount
+        del_sales = self.db.execute(delete(SalesHistory)).rowcount
+        del_prod = self.db.execute(delete(Product)).rowcount
+        del_sup = self.db.execute(delete(Supplier)).rowcount
+        self.db.commit()
+
+        audit(
+            self.db,
+            event_type='DATABASE_PURGED_FOR_FRESH_IMPORT',
+            actor='system-refresh',
+            entity_type='database',
+            entity_id='all_operational_tables',
+            details={
+                'deleted_feedback': del_fb,
+                'deleted_proposals': del_prop,
+                'deleted_runs': del_runs,
+                'deleted_batches': del_batch,
+                'deleted_sales': del_sales,
+                'deleted_products': del_prod,
+                'deleted_suppliers': del_sup,
+            },
+        )
+        self.db.commit()
+        return {
+            'deleted_products': del_prod,
+            'deleted_suppliers': del_sup,
+            'deleted_batches': del_batch,
+            'deleted_sales': del_sales,
+            'deleted_proposals': del_prop,
+        }
+
+    def ingest_excel(
+        self,
+        file_content: bytes,
+        filename: str = 'marg_export.xlsx',
+        clear_existing: bool = False
+    ) -> dict[str, Any]:
         """
         Parses MARG Excel / CSV and updates products, inventory batches, suppliers, and sales history.
+        If clear_existing is True, completely purges previous database records before importing.
         """
+        purged_counts: dict[str, int] = {}
+        if clear_existing:
+            purged_counts = self.purge_all_data()
+
         parsed = MargExcelParser.parse_file(file_content)
 
         products_data = parsed['products']
@@ -28,6 +83,8 @@ class IngestionService:
         sales_data = parsed['sales_history']
 
         stats = {
+            'database_cleared': clear_existing,
+            'purged_counts': purged_counts,
             'products_upserted': 0,
             'suppliers_upserted': 0,
             'batches_inserted': 0,
