@@ -154,7 +154,7 @@ def list_runs(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @app.get('/proposals', tags=['proposals'])
 def list_proposals(status_filter: Optional[str] = None, db: Session = Depends(get_db)):
-    stmt = select(ProcurementProposal).order_by(ProcurementProposal.created_at.desc())
+    stmt = select(ProcurementProposal).order_by(ProcurementProposal.product_name.asc())
     if status_filter:
         stmt = stmt.where(ProcurementProposal.status == status_filter.upper())
     proposals = db.scalars(stmt).all()

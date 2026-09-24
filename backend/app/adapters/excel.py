@@ -100,22 +100,51 @@ def _clean_str(val: Any) -> str:
 def canonical_medicine_key(name: str) -> str:
     """
     Extracts the canonical medicine key by normalizing spacing, punctuation,
-    dosage forms, and packing multiples across MARG reports.
+    dosage forms, volume/weight units, and packing multiples across MARG reports.
     E.g. 'AC-PLUS TABLET 10X2X10' and 'AC-PLUS TABLET' both yield 'ACPLUS'.
+    'ALLZYME-LARGE-BR SYRUP-200ML 200M.L' and 'ALLZYME-LARGE-BR' both yield 'ALLZYMELARGEBR'.
+    'ALKAJEM-SYRUP 100 M.L' and 'ALKAJEM-SYRUP 100' both yield 'ALKAJEM'.
     """
-    s = re.sub(r'[^a-zA-Z0-9]', ' ', str(name)).upper()
+    s = str(name).upper()
+    s = s.replace('M.L', 'ML').replace('M.G', 'MG').replace('G.M', 'GM')
+    s = re.sub(r'\b\d+\s*(ML|GM|MG|LTR|LT|KG)\b', ' ', s)
+    s = re.sub(r'(\d+)(ML|GM|MG|LTR|LT|KG)\b', ' ', s)
+    s = re.sub(r'[^A-Z0-9]', ' ', s)
+
     noise = {
         'TAB', 'TABLET', 'TABLETS', 'CAP', 'CAPSULE', 'CAPSULES',
         'SYP', 'SYRUP', 'SUSP', 'SUSPEN', 'SUS', 'DROP', 'DROPS',
         'OINT', 'CREAM', 'GEL', 'SOAP', 'INJ', 'INJECTION', 'LOTION',
-        'ML', 'GM', 'MG', 'LTR', 'LT'
+        'ML', 'GM', 'MG', 'LTR', 'LT', 'KG', 'PCS', 'BOX', 'BOTTLE'
     }
-    tokens = [
-        t for t in s.split()
-        if t not in noise and not re.match(r'^\d+X\d+(X\d+)?$', t) and not re.match(r'^\d+X\d+X\d+$', t)
-    ]
+
+    tokens = []
+    for t in s.split():
+        if t in noise:
+            continue
+        if re.match(r'^\d+X\d+(X\d+)?$', t) or re.match(r'^\d+X\d+X\d+$', t):
+            continue
+        tokens.append(t)
+
+    while len(tokens) > 1 and tokens[-1].isdigit():
+        if len(''.join(tokens[:-1])) >= 4:
+            tokens = tokens[:-1]
+        else:
+            break
+
     res = ''.join(tokens)
-    return res if res else re.sub(r'[^a-zA-Z0-9]', '', str(name)).upper()
+    return res if res else re.sub(r'[^A-Z0-9]', '', str(name)).upper()
+
+
+def is_footer_or_junk_row(name: str) -> bool:
+    if not name:
+        return True
+    s = str(name).strip().upper()
+    if re.search(r'^\d+\s*ITEMS?$', s) or 'ITEMS' in s:
+        return True
+    if s in ('TOTAL', 'GRAND TOTAL', 'SUB TOTAL', 'SUMMARY', 'NAN', 'NONE', 'REMARKS'):
+        return True
+    return False
 
 
 def _make_stable_code(name: str) -> str:
@@ -446,7 +475,7 @@ class MargExcelParser:
 
         for _, row in df.iterrows():
             name = _clean_str(row.get(name_col))
-            if not name or name.upper() in ('TOTAL', 'GRAND TOTAL', 'NAN', 'NONE', 'REMARKS'):
+            if not name or is_footer_or_junk_row(name):
                 continue
 
             qty = _parse_float(row.get(qty_col), 0.0) if qty_col else 0.0
@@ -508,7 +537,7 @@ class MargExcelParser:
 
         for _, row in df.iterrows():
             name = _clean_str(row.get(name_col))
-            if not name or name.upper() in ('TOTAL', 'GRAND TOTAL', 'NAN', 'NONE'):
+            if not name or is_footer_or_junk_row(name):
                 continue
 
             rate = _parse_float(row.get(rate_col), 0.0) if rate_col else 0.0
@@ -654,6 +683,8 @@ class MargExcelParser:
             code = _clean_str(row.get('product_code'))
             name = _clean_str(row.get('product_name'))
             if not code and not name:
+                continue
+            if is_footer_or_junk_row(name):
                 continue
             if not code:
                 code = _make_stable_code(name)

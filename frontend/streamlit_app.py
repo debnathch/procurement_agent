@@ -21,6 +21,22 @@ try:
 except ImportError:
     settings = None
 
+
+def is_excluded_product(name: str) -> bool:
+    """
+    Excludes non-medicine items matching user-blacklisted keywords:
+    'product card', 'visual aid', 'visiting', 'cap', 'cylinder' and summary footer rows.
+    """
+    if not name:
+        return True
+    nl = str(name).lower().replace('-', ' ')
+    blacklist = ['product card', 'visual aid', 'visiting', 'cylinder', 'cap']
+    if any(b in nl for b in blacklist):
+        return True
+    if re.search(r'^\d+\s*items?$', nl.strip()):
+        return True
+    return False
+
 # Page config
 st.set_page_config(
     page_title="MARG Procurement Agent",
@@ -157,8 +173,9 @@ if is_healthy:
         proposals = []
 
 # Top metrics
-pending = [p for p in proposals if p['status'] == 'PENDING']
-approved = [p for p in proposals if p['status'] in ('APPROVED_PENDING_EXECUTION', 'EXECUTED')]
+valid_proposals = [p for p in proposals if not is_excluded_product(p.get('product_name', ''))]
+pending = [p for p in valid_proposals if p.get('status') == 'PENDING']
+approved = [p for p in valid_proposals if p.get('status') in ('APPROVED_PENDING_EXECUTION', 'EXECUTED')]
 total_pending_val = sum(p.get('estimated_value', 0) for p in pending)
 high_expiry_items = sum(1 for p in pending if p.get('expiry_risk_score', 0) >= 0.25)
 
@@ -351,6 +368,11 @@ with tab_proposals:
 
     with col_search:
         search_kw = st.text_input("🔍 Search by Product or Code", "", key="proposal_search_kw")
+
+    # Filter out blacklisted non-medicine items
+    current_proposals = [p for p in current_proposals if not is_excluded_product(p.get('product_name', ''))]
+    # Sort alphabetically by product name (A-Z)
+    current_proposals.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
 
     if search_kw:
         current_proposals = [
@@ -575,6 +597,10 @@ with tab_approved:
     else:
         approved_proposals = [p for p in proposals if p.get('status') in ('APPROVED_PENDING_EXECUTION', 'EXECUTED')]
 
+    # Filter blacklisted items and sort alphabetically
+    approved_proposals = [p for p in approved_proposals if not is_excluded_product(p.get('product_name', ''))]
+    approved_proposals.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
+
     if not approved_proposals:
         st.info("No approved orders yet. Review and approve proposals in the 'Review & Correct Suggestions' tab.")
     else:
@@ -632,6 +658,10 @@ with tab_inventory:
                     df_inv['product_name'] = df_inv.get('product_code', '')
                 else:
                     df_inv['product_name'] = df_inv['product_name'].fillna(df_inv.get('product_code', ''))
+
+                # Filter blacklisted items and sort alphabetically A-Z
+                df_inv = df_inv[~df_inv['product_name'].apply(is_excluded_product)]
+                df_inv = df_inv.sort_values(by='product_name', ascending=True)
 
                 col_srch, col_cnt = st.columns([3, 1])
                 with col_srch:
