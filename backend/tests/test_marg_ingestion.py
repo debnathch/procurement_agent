@@ -130,3 +130,18 @@ def test_ingestion_service_in_memory_db():
     assert stats['batches_inserted'] == 1
     assert stats['suppliers_upserted'] == 1
     session.close()
+
+
+def test_canonical_medicine_key_generalized():
+    from backend.app.adapters.excel import canonical_medicine_key
+
+    # MARG column truncation and trailing packaging variations
+    assert canonical_medicine_key('BR-LIVA - 200 ml      200') == canonical_medicine_key('BR-LIVA - 200 ml              200 ml')
+    assert canonical_medicine_key('BR-LIVA - 200 ml 200') == canonical_medicine_key('BR-LIVA - 200 ml 200 ml')
+    assert canonical_medicine_key('Gastine Suspension    100') == canonical_medicine_key('Gastine Suspension            100 ML')
+    assert canonical_medicine_key('CLOB-NM-CREAM         15') == canonical_medicine_key('CLOB-NM-CREAM                 15 G.M')
+    assert canonical_medicine_key('ITRABEN-100 CAPSULES') == canonical_medicine_key('ITRABEN-100 CAPSULES          10X1X10 CAP')
+    assert canonical_medicine_key('ACIGIN-T4') == canonical_medicine_key('ACIGIN-T4                     10X1X10 TAB')
+    assert canonical_medicine_key('AZIBEN-200 ORAL SUSPEN30ml') == canonical_medicine_key('AZIBEN-200 ORAL SUSPENSION   30ml')
+    assert canonical_medicine_key('AC-PLUS TABLET') == canonical_medicine_key('AC-PLUS TABLET                10X2X10')
+

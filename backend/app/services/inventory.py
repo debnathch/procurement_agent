@@ -19,24 +19,20 @@ class InventoryService:
         now = datetime.utcnow()
         horizon = now + timedelta(days=settings.expiry_risk_horizon_days)
 
-        batches = self.db.scalars(
-            select(InventoryBatch).where(InventoryBatch.product_code == product_code)
-        ).all()
+        from backend.app.adapters.excel import canonical_medicine_key
+        prod = self.db.get(Product, product_code)
+        alt_codes = [product_code]
+        if prod:
+            c_key = canonical_medicine_key(prod.product_name)
+            all_prods = self.db.scalars(select(Product)).all()
+            alt_codes = list({
+                p.product_code for p in all_prods
+                if canonical_medicine_key(p.product_name) == c_key
+            } | {product_code})
 
-        if not batches:
-            from backend.app.adapters.excel import canonical_medicine_key
-            prod = self.db.get(Product, product_code)
-            if prod:
-                c_key = canonical_medicine_key(prod.product_name)
-                all_prods = self.db.scalars(select(Product)).all()
-                alt_codes = [
-                    p.product_code for p in all_prods
-                    if canonical_medicine_key(p.product_name) == c_key
-                ]
-                if alt_codes:
-                    batches = self.db.scalars(
-                        select(InventoryBatch).where(InventoryBatch.product_code.in_(alt_codes))
-                    ).all()
+        batches = self.db.scalars(
+            select(InventoryBatch).where(InventoryBatch.product_code.in_(alt_codes))
+        ).all()
 
         on_hand = 0.0
         on_order = 0.0

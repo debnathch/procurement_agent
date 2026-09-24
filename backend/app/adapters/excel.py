@@ -119,42 +119,76 @@ def canonical_medicine_key(name: str) -> str:
     """
     Extracts the canonical medicine key by normalizing spacing, punctuation,
     dosage forms, volume/weight units, packaging materials, and packing multiples across MARG reports.
-    E.g. 'AZIBEN-200 ORAL SUSPEN30ml' and 'AZIBEN-200 ORAL SUSPENSION 30ml' both yield 'AZIBEN200'.
-    'AC-PLUS TABLET 10X2X10' and 'AC-PLUS TABLET' both yield 'ACPLUS'.
-    'ALLZYME-LARGE-BR SYRUP-200ML 200M.L' and 'ALLZYME-LARGE-BR' both yield 'ALLZYMELARGEBR'.
-    'Moxit-L-500- (DWARKA P10X10' and 'Moxit-L-500- (DWARKA PHARMA) 10X10 CAP' both yield 'MOXITL500'.
+    E.g.:
+    - 'BR-LIVA - 200 ml      200' and 'BR-LIVA - 200 ml              200 ml' both yield 'BRLIVA'.
+    - 'AZIBEN-200 ORAL SUSPEN30ml' and 'AZIBEN-200 ORAL SUSPENSION 30ml' both yield 'AZIBEN200'.
+    - 'AC-PLUS TABLET 10X2X10' and 'AC-PLUS TABLET' both yield 'ACPLUS'.
+    - 'Gastine Suspension    100' and 'Gastine Suspension 100 ML' both yield 'GASTINE'.
+    - 'ITRABEN-100 CAPSULES' and 'ITRABEN-100 CAPSULES 10X1X10 CAP' both yield 'ITRABEN100'.
     """
     if not name:
         return ''
-    s = str(name).upper().strip()
+    s = str(name).strip()
 
-    # 1. Remove parenthetical notes/companies even if unclosed: e.g. (DWARKA PHARMA), (DWARKA P
+    # 0. Strip trailing MARG packaging specification after 2 or more spaces
+    parts = re.split(r'\s{2,}', s)
+    if len(parts) >= 2:
+        last = parts[-1].strip()
+        if (re.match(r'^\d+\s*[*xX]\s*\d+', last, re.I) or
+            re.match(r'^\d+\s*(?:ML|GM|MG|LTR|LT|KG|M|PCS|TAB|CAP|BTL|VIAL|AMP)?$', last, re.I) or
+            re.match(r'^\d+\s*(?:ML|GM|MG|LTR|LT|KG|M|PCS|TAB|CAP|BTL|VIAL|AMP)\b', last, re.I) or
+            re.match(r'^(?:ML|GM|MG|LTR|LT|KG|PCS|TAB|CAP|BTL|VIAL|AMP)\b', last, re.I) or
+            re.match(r'^\d+$', last)):
+            s = ' '.join(parts[:-1]).strip()
+
+    # 1. Strip trailing packaging patterns even if single space or already collapsed
+    s = re.sub(r'\s+\d+\s*[*xX]\s*\d+(\s*[*xX]\s*\d+)?(\s+[A-Za-z]+)?$', '', s, flags=re.I)
+    s = re.sub(r'\s+\d+\s*\*\s*\d+(\s+[A-Za-z]+)?$', '', s, flags=re.I)
+    s = re.sub(r'\s+\d+\'S$', '', s, flags=re.I)
+    s = re.sub(r'\s+\d+\s*PCS$', '', s, flags=re.I)
+    # Number at end preceded by dosage form or unit
+    s = re.sub(r'(\b(?:ML|GM|MG|LTR|LT|KG|M|SYP|SYRUP|SUSP|SUSPEN|SUSPENSION|CREAM|OINT|GEL|DROPS?|INJ|TAB|TABLET|CAP|CAPSU|CAPSULE|CAR|BAG|BANNER|CARTON|LABEL|BOX|BOTTLE|CONTAINER))\s+\d+$', r'\1', s, flags=re.I)
+    # Trailing duplicate number (e.g. 'BR-LIVA - 200 ml 200' -> remove second 200)
+    m = re.search(r'\b(\d+)\b.*\s+(\1)$', s)
+    if m:
+        s = re.sub(r'\s+' + m.group(2) + r'$', '', s)
+    # Trailing ' 1' pack indicator
+    s = re.sub(r'(?<=[A-Za-z\/\-])\s+1$', '', s)
+
+    s = s.upper().strip()
+
+    # 2. Remove parenthetical notes/companies even if unclosed: e.g. (DWARKA PHARMA), (DWARKA P
     s = re.sub(r'\([^\)]*(?:\)|$)', ' ', s)
 
-    # 2. Normalize volume & weight units
+    # 3. Normalize volume & weight units
     s = s.replace('M.L', 'ML').replace('M.G', 'MG').replace('G.M', 'GM')
 
-    # 3. Remove MRP clauses e.g. MRP-150/-, MR-100, MRP 200
+    # 4. Remove MRP clauses e.g. MRP-150/-, MR-100, MRP 200
     s = re.sub(r'\bMRP?\s*[-:]?\s*\d+.*', ' ', s)
 
-    # 4. Separate glued packaging, packs, units:
-    # e.g. 'SUSPEN30ML' -> 'SUSPEN 30ML', 'CAPSULE10X10' -> 'CAPSULE 10X10', 'A10X10' -> 'A 10X10'
-    s = re.sub(r'([A-Z])(\d+X\d+)', r'\1 \2', s)
+    # 5. Remove packaging patterns anywhere in the string
+    s = re.sub(r'\b\d+\s*[*xX]\s*\d+\s*[*xX]\s*\d+(\s*[A-Z]+)?\b', ' ', s)
+    s = re.sub(r'\b\d+\s*[*xX]\s*\d+(\s*[A-Z]+)?\b', ' ', s)
+    s = re.sub(r'\b\d+\s*\*\s*\d+\b', ' ', s)
+    s = re.sub(r'\b\d+\'S\b', ' ', s)
+
+    # 6. Separate glued packaging, packs, units (avoid splitting X inside packaging)
+    s = re.sub(r'([A-WYZ])(\d+X\d+)', r'\1 \2', s)
     s = re.sub(r'([A-Z])(\d+\s*(?:ML|GM|MG|LTR|LT|KG)\b)', r'\1 \2', s)
     s = re.sub(r'(\d+M)(\d+ML)', r'\1 \2', s)
     s = re.sub(r'\b(SUSP|SUSPEN|SUSPENSION|TAB|TABLET|CAP|CAPSU|CAPSUL|CAPSULE|SYP|SYRUP|OINT|CREAM|GEL|INJ|DROPS?|SOFTGEL)(\d+)', r'\1 \2', s)
 
-    # 5. Remove volume/weight quantities e.g. 200ML, 30 ML, 5 LTR, 170M
+    # 7. Remove volume/weight quantities e.g. 200ML, 30 ML, 5 LTR, 170M
     s = re.sub(r'\b\d+\s*(?:ML|GM|MG|LTR|LT|KG|M)\b', ' ', s)
     s = re.sub(r'(\d+)(?:ML|GM|MG|LTR|LT|KG|M)\b', ' ', s)
 
-    # 6. Remove packaging prefixes/materials that get truncated: ALU-ALU, ALU, ALUMUNIAM, STRIP, STP, BLISTER
+    # 8. Remove packaging prefixes/materials that get truncated: ALU-ALU, ALU, ALUMUNIAM, STRIP, STP, BLISTER
     s = re.sub(r'\b(?:ALU\s*ALU|ALU|AL|ALUMUNIAM|ALUMINIUM|SILVER|GOLD|STRIP|STP|STR|BLISTER|BLIST)\b', ' ', s)
 
-    # 7. Replace non-alphanumeric with spaces
+    # 9. Replace non-alphanumeric with spaces
     s = re.sub(r'[^A-Z0-9]', ' ', s)
 
-    # 8. Comprehensive noise words: dosage forms, packaging types, materials, route
+    # 10. Comprehensive noise words: dosage forms, packaging types, materials, route
     noise = {
         'TAB', 'TABS', 'TABLET', 'TABLETS',
         'CAP', 'CAPS', 'CAPSU', 'CAPSUL', 'CAPSULE', 'CAPSULES', 'SOFTGEL',
@@ -172,14 +206,14 @@ def canonical_medicine_key(name: str) -> str:
         # Units
         'ML', 'GM', 'MG', 'LTR', 'LT', 'KG', 'MCG', 'IU', 'M',
         # General non-distinctive / truncated fragments
-        'MR', 'MRP', 'A', 'S'
+        'MR', 'MRP', 'A', 'S', 'X'
     }
 
     tokens = []
     for t in s.split():
         if t in noise:
             continue
-        if re.match(r'^\d+X\d+(X\d+)?$', t) or re.match(r'^\d+X\d+X\d+$', t) or re.match(r'^\d+X\d+$', t):
+        if re.match(r'^\d+X\d*$', t) or re.match(r'^\d+X\d+X\d+$', t) or re.match(r'^\d+X\d+$', t):
             continue
         tokens.append(t)
 
