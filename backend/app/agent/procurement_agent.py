@@ -26,7 +26,7 @@ class ProcurementAgent:
         self.policy = ProcurementPolicy(settings.default_review_days, settings.default_safety_days, settings.expiry_risk_horizon_days)
         self.guardrails = ProcurementGuardrails()
 
-    def run(self, product_codes: list[str] | None = None):
+    def run(self, product_codes: list[str] | None = None, lead_time_override: int | None = None):
         run_id = uuid.uuid4().hex
         stmt = select(Product).where(Product.reorder_enabled == True)
         if product_codes:
@@ -37,7 +37,7 @@ class ProcurementAgent:
             demand, demand_source = self.demand.forecast_daily(product.product_code)
             inv = self.inventory.position(product.product_code, demand)
             supplier = self.suppliers.choose(product)
-            lead_time = supplier.lead_time_days if supplier else 7
+            lead_time = lead_time_override or (supplier.lead_time_days if supplier and supplier.lead_time_days else settings.default_lead_time_days)
             unit_cost = product.unit_cost or (inv['batches'][0].unit_cost if inv['batches'] else 0.0)
             calc = self.policy.calculate(
                 avg_daily_demand=demand, lead_time_days=lead_time,

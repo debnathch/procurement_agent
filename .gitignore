@@ -1,0 +1,50 @@
+# Python environment & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Local Environment Variables & Secrets
+.env
+
+# Local Databases & SQLite
+*.db
+*.sqlite3
+procurement_agent.db
+
+# Output & Generated Order Exports
+outbox/
+*.csv
+!tests/**/*.csv
+
+# IDE & Editor caches
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Streamlit local runtime cache
+.streamlit/

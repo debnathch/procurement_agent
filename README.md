@@ -12,7 +12,7 @@ Local-first, human-approved procurement agent for pharmaceutical distribution wi
 - Dry-run / CSV / future MARG execution adapters
 - FastAPI backend + Streamlit UI
 - SQLite local development database
-- Tests and architecture/LLD documentation
+- Tests and architecture/[LLD documentation](LLD.md)
 
 ## Safety defaults
 The default execution mode is `dry_run`. Real MARG execution is disabled until the exact connector contract is configured and validated.
