@@ -1,8 +1,8 @@
-"""Demand forecasting service — uses SalesHistory if available, falls back to reorder_point."""
+"""Demand forecasting service — uses SalesHistory if available, falls back to reorder_point or stockout baseline."""
 from datetime import datetime, timedelta
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
-from backend.app.models.entities import SalesHistory, Product
+from backend.app.models.entities import SalesHistory, Product, InventoryBatch
 
 
 class DemandService:
@@ -12,7 +12,7 @@ class DemandService:
     def forecast_daily(self, product_code: str, lookback_days: int = 90) -> tuple[float, str]:
         """
         Returns (avg_daily_demand, source_label).
-        Priority: sales history → reorder_point heuristic → 0.
+        Priority: sales history → reorder_point heuristic → stockout replenishment baseline → 0.
         """
         cutoff = datetime.utcnow() - timedelta(days=lookback_days)
 
@@ -33,10 +33,18 @@ class DemandService:
             avg_daily = total_sold / lookback_days
             return round(avg_daily, 4), f'sales_history_{lookback_days}d'
 
-        # Fallback: estimate daily demand from reorder_point / 30 if available
+        # Fallback 1: estimate daily demand from reorder_point / 30 if available
         product = self.db.get(Product, product_code)
         if product and product.reorder_point and product.reorder_point > 0:
             avg_daily = product.reorder_point / 30.0
             return round(avg_daily, 4), 'reorder_point_heuristic'
+
+        # Fallback 2: Catalog items that are completely out of stock get baseline replenishment demand
+        if product and product.reorder_enabled:
+            batches = self.db.scalars(select(InventoryBatch).where(InventoryBatch.product_code == product_code)).all()
+            total_on_hand = sum(b.qty_on_hand for b in batches)
+            if total_on_hand <= 0:
+                baseline = max(1.0, product.min_order_qty, product.pack_size) / 30.0
+                return round(baseline, 4), 'stockout_replenishment_baseline'
 
         return 0.0, 'no_history'

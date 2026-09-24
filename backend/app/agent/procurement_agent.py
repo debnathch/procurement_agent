@@ -11,6 +11,7 @@ from backend.app.services.policy import ProcurementPolicy
 from backend.app.services.supplier import SupplierService
 from backend.app.services.guardrails import ProcurementGuardrails
 from backend.app.services.audit import audit
+from backend.app.core.config import settings
 
 class ProcurementAgent:
     """Reusable bounded procurement domain agent."""
@@ -22,7 +23,6 @@ class ProcurementAgent:
         self.demand = DemandService(db)
         self.inventory = InventoryService(db)
         self.suppliers = SupplierService(db)
-        from backend.app.core.config import settings
         self.policy = ProcurementPolicy(settings.default_review_days, settings.default_safety_days, settings.expiry_risk_horizon_days)
         self.guardrails = ProcurementGuardrails()
 

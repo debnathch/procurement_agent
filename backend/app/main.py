@@ -228,6 +228,45 @@ def decide_proposal(proposal_id: int, req: DecisionRequest, db: Session = Depend
     return result
 
 
+class BatchDecisionRequest(BaseModel):
+    action: str = 'approve'                        # 'approve' | 'reject'
+    proposal_ids: Optional[list[int]] = None      # None means all pending proposals
+    reason: Optional[str] = None
+    actor: str = 'human-ui'
+
+
+@app.post('/proposals/batch-decide', tags=['proposals'])
+def batch_decide_proposals(req: BatchDecisionRequest, db: Session = Depends(get_db)):
+    """Batch approve or reject proposals."""
+    svc = ProposalService(db)
+    stmt = select(ProcurementProposal).where(ProcurementProposal.status == 'PENDING')
+    if req.proposal_ids:
+        stmt = stmt.where(ProcurementProposal.id.in_(req.proposal_ids))
+    proposals = db.scalars(stmt).all()
+
+    succeeded = 0
+    errors = []
+    for p in proposals:
+        try:
+            svc.decide(
+                proposal_id=p.id,
+                action=req.action,
+                reason=req.reason,
+                actor=req.actor,
+            )
+            succeeded += 1
+        except Exception as exc:
+            errors.append(f"Proposal #{p.id} ({p.product_name}): {exc}")
+
+    return {
+        "status": "success",
+        "action": req.action,
+        "processed": succeeded,
+        "total_attempted": len(proposals),
+        "errors": errors[:10],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------

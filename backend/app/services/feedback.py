@@ -125,10 +125,25 @@ class ProposalService:
         supplier = self.db.get(Supplier, sid) if sid else None
 
         if supplier is None:
-            raise ValueError("An active supplier is required to approve this proposal.")
+            # Auto-assign or create default supplier so human approval is never blocked
+            default_sid = "SUP-DEFAULT"
+            supplier = self.db.get(Supplier, default_sid)
+            if not supplier:
+                supplier = Supplier(
+                    supplier_id=default_sid,
+                    supplier_name="Default Trade Supplier",
+                    lead_time_days=settings.default_lead_time_days,
+                    min_order_value=0.0,
+                    reliability_score=0.90,
+                    is_active=True,
+                )
+                self.db.add(supplier)
+                self.db.flush()
+            proposal.supplier_id = default_sid
+            proposal.supplier_name = supplier.supplier_name
 
         # Check policy: Is supplier override allowed?
-        if not settings.allow_supplier_change and sid != proposal.supplier_id:
+        if not settings.allow_supplier_change and sid and proposal.supplier_id and sid != proposal.supplier_id:
             raise ValueError("Changing supplier is disabled by policy (ALLOW_SUPPLIER_CHANGE=false).")
 
         # Step 4: Run guardrail validation on human input

@@ -324,7 +324,7 @@ with tab_proposals:
 
     col_ref, col_filt, col_search = st.columns([1, 2, 3])
     with col_ref:
-        if st.button("🔄 Refresh Data"):
+        if st.button("🔄 Refresh Data", key="refresh_proposals_btn"):
             st.rerun()
 
     with col_filt:
@@ -337,24 +337,24 @@ with tab_proposals:
             url = f"{BACKEND_URL}/proposals"
             if status_filter != "ALL":
                 url += f"?status_filter={status_filter}"
-            p_res = requests.get(url, timeout=5)
+            p_res = requests.get(url, timeout=10)
             if p_res.status_code == 200:
                 current_proposals = p_res.json()
         except Exception as e:
             st.error(f"Error loading proposals: {e}")
 
     with col_search:
-        search_kw = st.text_input("🔍 Search by Product or Code", "")
+        search_kw = st.text_input("🔍 Search by Product or Code", "", key="proposal_search_kw")
 
     if search_kw:
         current_proposals = [
             p for p in current_proposals
-            if search_kw.lower() in p['product_name'].lower() or search_kw.lower() in p['product_code'].lower()
+            if search_kw.lower() in p.get('product_name', '').lower() or search_kw.lower() in p.get('product_code', '').lower()
         ]
 
     if not current_proposals:
         st.info("No proposals found for the selected filter. Upload a MARG Excel or click below to trigger a run:")
-        if st.button("⚡ Run Procurement Agent Now"):
+        if st.button("⚡ Run Procurement Agent Now", key="trigger_run_btn"):
             if is_healthy:
                 r_res = requests.post(f"{BACKEND_URL}/runs", json={"lead_time_days": int(config_lead_time)}, timeout=30)
                 if r_res.status_code == 201:
@@ -363,12 +363,68 @@ with tab_proposals:
                 else:
                     st.error(f"Run failed: {r_res.text}")
     else:
-        st.write(f"Showing **{len(current_proposals)}** proposals")
+        pending_in_view = [p for p in current_proposals if p['status'] == 'PENDING']
 
-        # Map supplier IDs to names for selector
+        # Bulk Approval & Summary Actions Bar
+        col_sum1, col_sum2 = st.columns([3, 2])
+        with col_sum1:
+            st.markdown(f"##### Showing **{len(current_proposals)}** total proposals ({len(pending_in_view)} pending review)")
+        with col_sum2:
+            if pending_in_view:
+                if st.button(f"⚡ Bulk Approve All Pending ({len(pending_in_view)} Items)", type="primary", use_container_width=True, help="Approve all currently pending proposals at their suggested quantities in one step"):
+                    with st.spinner(f"Approving {len(pending_in_view)} proposals..."):
+                        try:
+                            b_res = requests.post(
+                                f"{BACKEND_URL}/proposals/batch-decide",
+                                json={"action": "approve", "actor": "human-reviewer", "reason": "Bulk approved by procurement manager"},
+                                timeout=30
+                            )
+                            if b_res.status_code == 200:
+                                res_data = b_res.json()
+                                st.success(f"🎉 Successfully approved {res_data.get('processed', 0)} purchase orders! Switch to Tab 3 to view & export POs.")
+                                st.rerun()
+                            else:
+                                st.error(f"Bulk approval error: {b_res.text}")
+                        except Exception as exc:
+                            st.error(f"Batch request error: {exc}")
+
+        # Summary Table view
+        with st.expander("📊 Proposal Summary Table (Click to expand / collapse)", expanded=False):
+            df_prop_summary = pd.DataFrame([
+                {
+                    'Product Code': p['product_code'],
+                    'Product Name': p['product_name'],
+                    'Recommended Qty': p['recommended_qty'],
+                    'Unit Cost (₹)': p['unit_cost'],
+                    'Total Value (₹)': p['estimated_value'],
+                    'Avg Daily Demand': p['avg_daily_demand'],
+                    'Stock on Hand': p['stock_on_hand'],
+                    'Expiry Risk': f"{p.get('expiry_risk_score', 0):.0%}",
+                    'Status': p['status'],
+                }
+                for p in current_proposals
+            ])
+            st.dataframe(df_prop_summary, use_container_width=True)
+
+        # Build supplier lookup options safely
         supplier_options = {s['supplier_id']: f"{s['supplier_name']} ({s['supplier_id']})" for s in suppliers_list}
+        if not supplier_options:
+            supplier_options = {"SUP-DEFAULT": "Default Trade Supplier"}
 
-        for p in current_proposals:
+        # Pagination for individual proposal review to ensure fast UI performance
+        items_per_page = 20
+        total_pages = max(1, (len(current_proposals) + items_per_page - 1) // items_per_page)
+
+        col_p1, col_p2, col_p3 = st.columns([1, 2, 1])
+        with col_p2:
+            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key="proposal_page_num")
+            st.caption(f"Showing page {page} of {total_pages} ({len(current_proposals)} items)")
+
+        start_idx = (page - 1) * items_per_page
+        end_idx = min(start_idx + items_per_page, len(current_proposals))
+        page_proposals = current_proposals[start_idx:end_idx]
+
+        for p in page_proposals:
             p_id = p['id']
             st_color = "orange" if p['status'] == 'PENDING' else ("green" if 'APPROVED' in p['status'] or p['status'] == 'EXECUTED' else "red")
 
@@ -383,7 +439,7 @@ with tab_proposals:
 
             with st.expander(
                 f"**{p['product_name']}** (`{p['product_code']}`) — Suggested: **{p['recommended_qty']:g} units** (₹{p['estimated_value']:,.2f}) | Status: :{st_color}[{p['status']}]",
-                expanded=(p['status'] == 'PENDING')
+                expanded=(p['status'] == 'PENDING' and len(page_proposals) <= 5)
             ):
                 st.markdown(risk_badge, unsafe_allow_html=True)
                 st.markdown(f"**Agent Rationale:** {p.get('rationale', 'N/A')}")
@@ -418,10 +474,10 @@ with tab_proposals:
                         st.write(f"💵 **Updated Total Value:** ₹{calculated_val:,.2f} *(at ₹{unit_cost:.2f} per unit)*")
 
                     with col_edit2:
-                        # Correct supplier
-                        current_sup_id = p.get('supplier_id') or (suppliers_list[0]['supplier_id'] if suppliers_list else None)
+                        # Correct supplier safely
                         sup_keys = list(supplier_options.keys())
-                        default_idx = sup_keys.index(current_sup_id) if current_sup_id in sup_keys else 0
+                        current_sup_id = p.get('supplier_id')
+                        default_idx = sup_keys.index(current_sup_id) if (current_sup_id and current_sup_id in sup_keys) else 0
 
                         corrected_supplier_id = st.selectbox(
                             "Supplier",
@@ -501,11 +557,27 @@ with tab_approved:
     st.subheader("3. Finalized & Approved Purchase Orders")
     st.markdown("All proposals that have been verified, corrected, and approved by the human reviewer.")
 
-    approved_proposals = [p for p in proposals if p['status'] in ('APPROVED_PENDING_EXECUTION', 'EXECUTED')]
+    # Dynamically fetch latest approved orders from backend
+    approved_proposals = []
+    if is_healthy:
+        try:
+            a_res = requests.get(f"{BACKEND_URL}/proposals?status_filter=APPROVED_PENDING_EXECUTION", timeout=5)
+            e_res = requests.get(f"{BACKEND_URL}/proposals?status_filter=EXECUTED", timeout=5)
+            approved_proposals = (a_res.json() if a_res.status_code == 200 else []) + (e_res.json() if e_res.status_code == 200 else [])
+        except Exception:
+            approved_proposals = [p for p in proposals if p.get('status') in ('APPROVED_PENDING_EXECUTION', 'EXECUTED')]
+    else:
+        approved_proposals = [p for p in proposals if p.get('status') in ('APPROVED_PENDING_EXECUTION', 'EXECUTED')]
 
     if not approved_proposals:
         st.info("No approved orders yet. Review and approve proposals in the 'Review & Correct Suggestions' tab.")
     else:
+        total_po_val = sum((p.get('approved_qty') or 0) * (p.get('unit_cost') or 0) for p in approved_proposals)
+        col_ap1, col_ap2, col_ap3 = st.columns(3)
+        col_ap1.metric("Total Approved Orders", len(approved_proposals))
+        col_ap2.metric("Total Order Value", f"₹{total_po_val:,.2f}")
+        col_ap3.metric("Execution Mode", settings.execution_mode.upper())
+
         df_approved = pd.DataFrame([
             {
                 'Product Code': p['product_code'],

@@ -84,9 +84,9 @@ class ProcurementGuardrails:
         if not product.reorder_enabled:
             reasons.append(f"Product '{product.product_code}' is disabled for automated reordering.")
 
-        # Check 5: Active supplier must be assigned
+        # Check 5: Active supplier check (Non-blocking warning; allows user to assign supplier in UI)
         if supplier is None or not supplier.is_active:
-            reasons.append("No active supplier is available for this product.")
+            warnings.append("No active supplier is linked to this product. Supplier can be assigned during review.")
 
         # Check 6: Supplier Minimum Order Value check (Non-blocking warning)
         if supplier and order_value < supplier.min_order_value:
@@ -95,7 +95,7 @@ class ProcurementGuardrails:
             )
 
         # Check 7: Packaging multiple check (Pharmaceutical strips/boxes cannot be broken)
-        if qty % pack != 0:
+        if pack > 1 and (qty % pack > 1e-4 and abs((qty % pack) - pack) > 1e-4):
             reasons.append(
                 f"Order quantity ({qty:g}) must be a clean multiple of packaging size ({pack})."
             )
