@@ -66,6 +66,14 @@ streamlit run frontend/streamlit_app.py
 API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)  
 UI: [http://localhost:8501](http://localhost:8501)
 
+### Stopping the Application
+
+- **If running in the foreground**: Press `Ctrl + C` in both terminal windows (FastAPI and Streamlit).
+- **If running in the background (or to free ports 8000 and 8501)**:
+  ```bash
+  lsof -ti:8000 -ti:8501 | xargs kill -9
+  ```
+
 ## MARG data flow
 
 MARG ERP -> Excel/API Adapter -> Common Normalization -> Validation/Cleaning -> Canonical Data Store -> Procurement Agent -> Human Approval -> Execution Adapter -> MARG
