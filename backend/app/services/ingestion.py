@@ -17,8 +17,24 @@ from backend.app.adapters.excel import MargExcelParser
 
 
 class IngestionService:
-    def __init__(self, db: Session):
-        self.db = db
+    """
+    Transactional database ingestion service for MARG ERP data.
+
+    Coordinates:
+    1. Full database purging for fresh uploads (if requested).
+    2. Parsing Excel / CSV files via `MargExcelParser`.
+    3. Atomic upserts into `Supplier`, `Product`, `InventoryBatch`, and `SalesHistory` tables.
+    4. Foreign key integrity enforcement across batch and sales records.
+    """
+
+    def __init__(self, db: Session) -> None:
+        """
+        Initialize the ingestion service with an active database session.
+
+        Args:
+            db (Session): Active SQLAlchemy database session.
+        """
+        self.db: Session = db
 
     def purge_all_data(self) -> dict[str, int]:
         """

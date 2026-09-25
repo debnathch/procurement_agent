@@ -57,7 +57,7 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     ],
     'expiry_date': [
         'expdate', 'expirydate', 'expiry', 'exp', 'expdt', 'exp_date', 'expiry_date',
-        'val', 'validity', 'validupto', 'valdate', 'bbd', 'bestbefore'
+        'validity', 'validupto', 'valdate', 'bbd', 'bestbefore'
     ],
     'qty_on_hand': [
         'clstock', 'closingstock', 'stock', 'balance', 'balqty', 'qty', 'onhand',
@@ -66,8 +66,9 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     'qty_on_order': ['qtyonorder', 'onorder', 'pendingpo', 'poqty', 'qty_on_order'],
     'supplier_id': ['supplierid', 'suppliercode', 'partycode', 'vendorid', 'supcode', 'supplier_id'],
     'supplier_name': [
-        'suppliername', 'supplier', 'partyname', 'party', 'vendorname', 'vendor',
-        'mfr', 'manufacturer', 'supplier_name'
+        'suppliername', 'suppliernames', 'nameofsupplier', 'nameofsuppliers',
+        'suppliers', 'supplier', 'partyname', 'party', 'vendorname', 'vendor',
+        'vendors', 'mfr', 'manufacturer', 'manufacturers', 'mfrname', 'supplier_name'
     ],
     'lead_time_days': ['leadtimedays', 'leadtime', 'crdays', 'creditdays', 'lead_time_days'],
     'min_order_value': ['minordervalue', 'mov', 'minorder', 'min_order_value'],
@@ -130,7 +131,11 @@ def canonical_medicine_key(name: str) -> str:
         return ''
     s = str(name).strip()
 
-    # 0. Strip trailing MARG packaging specification after 2 or more spaces
+    # 0. Separate glued units and trailing numbers caused by fixed-width MARG report column cuts
+    # e.g. '200 ML200' -> '200 ML 200', '100ML100' -> '100 ML 100'
+    s = re.sub(r'(\d+\s*(?:ML|GM|MG|LTR|LT|KG|M))(\d+)$', r'\1 \2', s, flags=re.I)
+
+    # 1. Strip trailing MARG packaging specification after 2 or more spaces
     parts = re.split(r'\s{2,}', s)
     if len(parts) >= 2:
         last = parts[-1].strip()
@@ -141,18 +146,26 @@ def canonical_medicine_key(name: str) -> str:
             re.match(r'^\d+$', last)):
             s = ' '.join(parts[:-1]).strip()
 
-    # 1. Strip trailing packaging patterns even if single space or already collapsed
+    # 2. Strip trailing packaging patterns even if single space or already collapsed
     s = re.sub(r'\s+\d+\s*[*xX]\s*\d+(\s*[*xX]\s*\d+)?(\s+[A-Za-z]+)?$', '', s, flags=re.I)
     s = re.sub(r'\s+\d+\s*\*\s*\d+(\s+[A-Za-z]+)?$', '', s, flags=re.I)
     s = re.sub(r'\s+\d+\'S$', '', s, flags=re.I)
     s = re.sub(r'\s+\d+\s*PCS$', '', s, flags=re.I)
-    # Number at end preceded by dosage form or unit
-    s = re.sub(r'(\b(?:ML|GM|MG|LTR|LT|KG|M|SYP|SYRUP|SUSP|SUSPEN|SUSPENSION|CREAM|OINT|GEL|DROPS?|INJ|TAB|TABLET|CAP|CAPSU|CAPSULE|CAR|BAG|BANNER|CARTON|LABEL|BOX|BOTTLE|CONTAINER))\s+\d+$', r'\1', s, flags=re.I)
-    # Trailing duplicate number (e.g. 'BR-LIVA - 200 ml 200' -> remove second 200)
-    m = re.search(r'\b(\d+)\b.*\s+(\1)$', s)
+
+    # 3. Trailing duplicate number even if unit was attached to earlier occurrence
+    # e.g. 'GINIPLEX SYRUP-200ML 200' -> 'GINIPLEX SYRUP-200ML'
+    #      'BENVITA GOLD -500 ML 500' -> 'BENVITA GOLD -500 ML'
+    #      'BR-LIVA - 200 ml 200' -> 'BR-LIVA - 200 ml'
+    #      'FENZYM 100ml 100' -> 'FENZYM 100ml'
+    m = re.search(r'(\d+)\s*(?:ML|GM|MG|LTR|LT|KG|M|PCS|TAB|CAP)?\b.*\s+(\1)$', s, flags=re.I)
     if m:
-        s = re.sub(r'\s+' + m.group(2) + r'$', '', s)
-    # Trailing ' 1' pack indicator
+        s = re.sub(r'\s+' + re.escape(m.group(2)) + r'$', '', s)
+
+    # 4. Number at end preceded by dosage form or unit
+    s = re.sub(r'(\b(?:ML|GM|MG|LTR|LT|KG|M|SYP|SYRUP|SUSP|SUSPEN|SUSPENSION|CREAM|OINT|GEL|DROPS?|INJ|TAB|TABLET|CAP|CAPSU|CAPSULE|CAR|BAG|BANNER|CARTON|LABEL|BOX|BOTTLE|CONTAINER))\s+\d+$', r'\1', s, flags=re.I)
+    s = re.sub(r'(?:ML|GM|MG|LTR|LT|KG|M)\s+\d+$', '', s, flags=re.I)
+
+    # 5. Trailing ' 1' pack indicator
     s = re.sub(r'(?<=[A-Za-z\/\-])\s+1$', '', s)
 
     s = s.upper().strip()
@@ -233,7 +246,43 @@ def is_footer_or_junk_row(name: str) -> bool:
         return True
     if s in ('TOTAL', 'GRAND TOTAL', 'SUB TOTAL', 'SUMMARY', 'NAN', 'NONE', 'REMARKS'):
         return True
+    # Ignore rows containing user-blacklisted keywords in item description:
+    for kw in ('PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG '):
+        if kw in s:
+            return True
     return False
+
+
+JUNK_SUPPLIERS: set[str] = {
+    'SUPPLIER NAME', 'SUPPLIER', 'SUPPLIERS', 'PARTY NAME', 'PARTY',
+    'MANUFACTURER', 'MFR', 'BILL DATE', 'BILL NO', 'DETAIL', 'TOTAL',
+    'GRAND TOTAL', 'SUB TOTAL', 'REMARKS', 'NAN', 'NONE', 'DEFAULT',
+    'NEW PARTY', 'PCD', 'NAME OF SUPPLIER', 'NAME OF SUPPLIERS'
+}
+
+
+def sanitize_supplier_name(val: Any) -> str:
+    """
+    Sanitizes supplier name by stripping leading dates (e.g. '04/08/2026 J.M HEALTHCARE CHANDI'),
+    normalizing spacing, and filtering out header artifacts, junk strings, and totals.
+    """
+    if val is None or pd.isna(val):
+        return ''
+    s = ' '.join(str(val).split()).strip()
+    if not s or s.upper() in JUNK_SUPPLIERS:
+        return ''
+    if any(bad in s.upper() for bad in ('DETAIL', '====', 'TAX <', 'BILL NO.', 'BILL DATE', '-BLANK-')):
+        return ''
+    # Strip leading date e.g. 04/08/2026 or 2026-04-08
+    s = re.sub(r'^\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}\s*', '', s).strip()
+    s = re.sub(r'^\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}\s*', '', s).strip()
+    if not s or s.upper() in JUNK_SUPPLIERS:
+        return ''
+    if any(bad in s.upper() for bad in ('DETAIL', '====', 'TAX <', 'BILL NO.', 'BILL DATE', '-BLANK-')):
+        return ''
+    if not re.search(r'[A-Za-z]', s):
+        return ''
+    return s
 
 
 def _make_stable_code(name: str) -> str:
@@ -444,6 +493,46 @@ def _map_columns(df: pd.DataFrame) -> dict[str, str]:
     return mapping
 
 
+def _resolve_headers_and_data(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Detects table headers in MARG reports, handling multi-tier / split headers
+    (such as when Row h has major categories like 'TAX', 'SUPPLIER' and Row h+1 has
+    sub-headers like '%', 'AMOUNT BILL NO.', 'BILL DATE', 'SUPPLIER NAME').
+    Returns the sliced dataframe and canonical/merged column names.
+    """
+    h = _find_header_row(df_raw)
+    if h + 1 < len(df_raw):
+        next_vals = [_clean_alpha(x) for x in df_raw.iloc[h + 1].tolist() if _clean_alpha(x)]
+        subheader_kws = {'suppliername', 'billdate', 'billno', 'amountbillno', 'amount', 'tax', 'rate', 'qty'}
+        explicit = any(c in ('suppliername', 'billdate', 'billno', 'amountbillno') for c in next_vals)
+        matches = sum(1 for c in next_vals if any(kw in c for kw in subheader_kws))
+        is_sub = explicit or (matches >= 2 and not any(c.isdigit() for c in next_vals))
+
+        if is_sub:
+            merged: list[str] = []
+            for col_i in range(df_raw.shape[1]):
+                m_val = _clean_str(df_raw.iloc[h, col_i])
+                s_val = _clean_str(df_raw.iloc[h + 1, col_i])
+                if s_val:
+                    if any(dec in m_val for dec in ('<====', '====>', 'DETAIL')) or not m_val:
+                        merged.append(s_val)
+                    elif s_val in ('%', 'AMOUNT'):
+                        merged.append(f'{m_val} {s_val}' if m_val else s_val)
+                    elif any(kw in _clean_alpha(s_val) for kw in ('supplier', 'party', 'billdate', 'billno', 'amount', 'tax')):
+                        merged.append(s_val)
+                    else:
+                        merged.append(f'{m_val} {s_val}' if m_val else s_val)
+                else:
+                    merged.append(m_val)
+            df = df_raw.iloc[h + 2:].copy()
+            df.columns = merged
+            return df, merged
+
+    df = df_raw.iloc[h + 1:].copy()
+    df.columns = [str(c) if pd.notna(c) else f"Col_{i}" for i, c in enumerate(df_raw.iloc[h].values)]
+    return df, list(df.columns)
+
+
 class MargExcelParser:
     """
     Parses MARG Excel & CSV files and returns canonical data structures ready for database ingestion.
@@ -494,7 +583,22 @@ class MargExcelParser:
         sheet_name: str,
         out: dict[str, list[dict[str, Any]]],
         filename: str = ''
-    ):
+    ) -> None:
+        """
+        Inspect and ingest a single Excel worksheet or CSV table.
+
+        Performs:
+        1. Multi-tier header resolution and column normalization.
+        2. Report classification (Sales Summary, Purchase Summary, Supplier List, Outstanding, or Stock Status).
+        3. Specialized dataset extraction into canonical output dictionary.
+        4. Universal supplier extraction safety net for any sheet with a supplier column.
+
+        Args:
+            df_raw (pd.DataFrame): Raw un-indexed pandas dataframe.
+            sheet_name (str): Worksheet title.
+            out (dict[str, list[dict[str, Any]]]): Accumulator dict holding extracted canonical records.
+            filename (str): Source export file name for contextual heuristics.
+        """
         if df_raw.empty or len(df_raw) < 2:
             return
 
@@ -506,9 +610,7 @@ class MargExcelParser:
         file_lower = filename.lower()
         sheet_lower = str(sheet_name).lower()
 
-        header_idx = _find_header_row(df_raw)
-        df = df_raw.iloc[header_idx + 1:].copy()
-        df.columns = df_raw.iloc[header_idx].values
+        df, cols = _resolve_headers_and_data(df_raw)
         df = df.dropna(how='all')
         if df.empty:
             return
@@ -559,6 +661,31 @@ class MargExcelParser:
             cls._extract_outstanding(df_renamed, out)
         else:
             cls._extract_stock_and_products(df_renamed, out)
+
+        # Universal supplier extraction safety net:
+        # If ANY uploaded sheet contains a column mapped to 'supplier_name', ensure all unique suppliers are added to out['suppliers']
+        if 'supplier_name' in df_renamed.columns:
+            seen_sids = {s['supplier_id'] for s in out['suppliers']}
+            seen_names = {s['supplier_name'].strip().upper() for s in out['suppliers'] if s.get('supplier_name')}
+            for raw_val in df_renamed['supplier_name'].dropna():
+                clean_sup = sanitize_supplier_name(raw_val)
+                if clean_sup and clean_sup.upper() not in seen_names:
+                    clean_slug = re.sub(r'[^A-Za-z0-9]', '', clean_sup)[:12].upper()
+                    sid = f"SUP-{clean_slug}" if clean_slug else f"SUP-{abs(hash(clean_sup)) % 10000:04d}"
+                    if sid not in seen_sids:
+                        out['suppliers'].append({
+                            'supplier_id': sid,
+                            'supplier_name': clean_sup,
+                            'contact_name': None,
+                            'contact_email': None,
+                            'contact_phone': None,
+                            'lead_time_days': settings.default_lead_time_days,
+                            'min_order_value': 0.0,
+                            'reliability_score': 0.90,
+                            'is_active': True,
+                        })
+                        seen_sids.add(sid)
+                        seen_names.add(clean_sup.upper())
 
     @classmethod
     def _extract_sales_summary(
@@ -703,10 +830,12 @@ class MargExcelParser:
     @classmethod
     def _extract_suppliers(cls, df: pd.DataFrame, out: dict[str, list[dict[str, Any]]]):
         seen_suppliers: set[str] = {s['supplier_id'] for s in out['suppliers']}
+        seen_names: set[str] = {s['supplier_name'].strip().upper() for s in out['suppliers'] if s.get('supplier_name')}
 
         for idx, row in df.iterrows():
-            name = _clean_str(row.get('supplier_name'))
-            if not name or name.upper() in ('PCD', 'NEW PARTY', 'TOTAL', 'REMARKS', 'NAN', 'NONE'):
+            raw_name = row.get('supplier_name')
+            name = sanitize_supplier_name(raw_name)
+            if not name or name.upper() in seen_names:
                 continue
 
             sid = _clean_str(row.get('supplier_id'))
@@ -733,14 +862,15 @@ class MargExcelParser:
                 'supplier_id': sid,
                 'supplier_name': name,
                 'contact_name': contact_info,
-                'contact_email': None,
-                'contact_phone': None,
+                'contact_email': _clean_str(row.get('contact_email')) or None,
+                'contact_phone': _clean_str(row.get('contact_phone')) or None,
                 'lead_time_days': lead_time,
                 'min_order_value': _parse_float(row.get('min_order_value'), 0.0),
                 'reliability_score': reliability,
                 'is_active': True,
             })
             seen_suppliers.add(sid)
+            seen_names.add(name.upper())
 
     @classmethod
     def _extract_outstanding(cls, df: pd.DataFrame, out: dict[str, list[dict[str, Any]]]):
@@ -821,6 +951,12 @@ class MargExcelParser:
         for _, row in df.iterrows():
             code = _clean_str(row.get('product_code'))
             name = _clean_str(row.get('product_name'))
+            # If item and description were in separate columns (e.g. 'I T E M' and 'D E S C R I P T I O N')
+            if 'D E S C R I P T I O N' in row and row['D E S C R I P T I O N']:
+                desc_val = _clean_str(row['D E S C R I P T I O N'])
+                if desc_val and desc_val not in name:
+                    name = f"{name} {desc_val}".strip() if name else desc_val
+
             if not code and not name:
                 continue
             if is_footer_or_junk_row(name):
@@ -845,16 +981,16 @@ class MargExcelParser:
                 _parse_float(row.get('M.R.P.'))
             )
 
+            supplier_name = sanitize_supplier_name(row.get('supplier_name'))
             supplier_id = _clean_str(row.get('supplier_id'))
-            supplier_name = _clean_str(row.get('supplier_name'))
             if supplier_name and not supplier_id:
                 clean_name_slug = re.sub(r'[^A-Za-z0-9]', '', supplier_name)[:12].upper()
                 supplier_id = f"SUP-{clean_name_slug}" if clean_name_slug else f"SUP-{abs(hash(supplier_name)) % 10000:04d}"
 
-            if supplier_id and supplier_id not in seen_suppliers:
+            if supplier_id and supplier_id not in seen_suppliers and supplier_name:
                 out['suppliers'].append({
                     'supplier_id': supplier_id,
-                    'supplier_name': supplier_name or supplier_id,
+                    'supplier_name': supplier_name,
                     'contact_name': None,
                     'contact_email': None,
                     'contact_phone': None,
@@ -876,12 +1012,14 @@ class MargExcelParser:
                     'unit_cost': cost_val,
                     'reorder_point': reorder_point,
                     'reorder_enabled': True,
-                    'preferred_supplier_id': supplier_id or None,
+                    'preferred_supplier_id': supplier_id if (supplier_id and supplier_name) else None,
                 })
                 seen_products.add(code)
 
             # Inventory batch
             batch_no = _clean_str(row.get('batch_no')) or 'DEFAULT'
+            if batch_no != 'DEFAULT':
+                batch_no = re.sub(r'^(?:ml|gm|mg|ltr|lt|kg|pcs|tab|cap)(?=[A-Z0-9\-\s])', '', batch_no, flags=re.I).strip() or batch_no
             qty_on_hand = _parse_float(row.get('qty_on_hand'), 0.0)
             qty_on_order = _parse_float(row.get('qty_on_order'), 0.0)
             expiry_val = row.get('expiry_date')
@@ -906,6 +1044,8 @@ class MargExcelParser:
             code = _clean_str(row.get('product_code'))
             name = _clean_str(row.get('product_name'))
             if not code and not name:
+                continue
+            if is_footer_or_junk_row(name):
                 continue
             if not code:
                 code = _make_stable_code(name)

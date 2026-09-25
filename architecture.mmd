@@ -1,14 +1,52 @@
 flowchart TD
-  MARG[MARG ERP] --> EXCEL[MARG Excel Adapter]
-  MARG --> API[MARG API Adapter - future]
-  EXCEL --> NORM[Common MARG Normalization]
-  API --> NORM
-  NORM --> V[Validation and Data Quality]
-  V --> CANON[Canonical Procurement Model]
-  CANON --> AGENT[Procurement Domain Agent]
-  AGENT --> FEFO[Demand + Inventory + Supplier + FEFO]
-  FEFO --> G[Deterministic Guardrails]
-  G --> HUMAN[Human Approval UI]
-  HUMAN --> EXEC[Execution Adapter]
-  EXEC --> MARG
-  HUMAN --> AUDIT[Audit + Feedback Memory]
+  subgraph Data_Layer ["Data Ingestion & Normalization Layer"]
+    MARG["MARG ERP 9+ Exports (.xls / .xlsx / .csv)"] --> EXCEL["MargExcelParser"]
+    MARG_API["MARG REST API (MargApiSourceAdapter)"] --> NORM["Canonical Normalization"]
+    EXCEL --> HDR["Multi-Tier Header Resolution (Subheader Merging)"]
+    HDR --> SAN["Supplier Name Sanitizer (Date-Prefix Stripping)"]
+    SAN --> NORM
+    NORM --> V["Validation, Foreign Key & Quality Checks"]
+    V --> DB[("SQLite Canonical Database Store")]
+    V --> SUPS[("Suppliers Table (Universal Upsert)")]
+  end
+
+  subgraph Engine_Layer ["Procurement Intelligence Engine"]
+    DB --> DS["Demand Forecasting (90-day Velocity & Heuristics)"]
+    DB --> IV["Inventory & Batch Position (FEFO Shelf-Life Risk)"]
+    SUPS --> SS["Supplier Selection (Preferred & Multi-Criteria Ranking)"]
+    DS --> AG["Procurement Domain Agent (ProcurementAgent)"]
+    IV --> AG
+    SS --> AG
+    AG --> POL["Procurement Policy (Coverage Target & Pack Rounding)"]
+    POL --> G["Deterministic Guardrails & Value Ceilings"]
+  end
+
+  subgraph Presentation_Execution ["Presentation & PO Execution Layer"]
+    G --> PROPO[("Proposals Store")]
+    PROPO --> FASTAPI["FastAPI REST Backend (:8000)"]
+    FASTAPI --> NOREORDER["No Need for Reorder API (/procurement/no-reorder)"]
+    PROPO --> UI["Streamlit Web UI (:8501)"]
+    NOREORDER --> UI
+    SUPS --> UI
+    UI --> HUMAN["Human Review & Correction (Qty, Notes, Supplier Selectbox)"]
+    HUMAN --> EXEC["PO Execution Factory (build_executor)"]
+    EXEC -->|dry_run| DRY["Dry-Run Simulator"]
+    EXEC -->|csv| CSV["CSV PO Export (outbox/)"]
+    EXEC -->|marg| MREST["Live MARG REST API Dispatch"]
+    MREST --> MARG
+    HUMAN --> AUDIT[("Compliance Audit & Feedback Event Store")]
+  end
+
+  subgraph Packaging_CICD ["Packaging, Runtime & CI/CD Pipeline"]
+    LAUNCHER["Unified Launcher (launcher.py)"] --> FASTAPI
+    LAUNCHER --> UI
+    SCRIPTS["One-Click Double-Click Launchers (run_mac.command / run_windows.bat)"] --> LAUNCHER
+    PYINST["PyInstaller Compiler (scripts/build_executable.py)"] --> BIN["Standalone Executables (dist/procurement-agent)"]
+    DOCKER["Multi-Stage Dockerfile (astral-sh/uv)"] --> CONT["Docker Container Image"]
+    GHA["GitHub Actions CI/CD (.github/workflows/ci-cd.yml)"] --> LINT["Quality & Lint (ruff)"]
+    LINT --> TEST["Test Suite (pytest via uv)"]
+    TEST --> BUILD_MAT["Multi-OS Binary Matrix (Linux/macOS/Win)"]
+    TEST --> DOCK_TEST["Docker Build Verification"]
+    BUILD_MAT --> REL["GitHub Releases on Tag (v*.*.*)"]
+  end
+

@@ -1,6 +1,7 @@
 """
 Unified launcher for Procurement Agent.
-Runs both the FastAPI backend and the Streamlit frontend in a single process / command.
+Runs both the FastAPI backend and the Streamlit frontend.
+Supports standard Python execution and PyInstaller standalone frozen executables.
 Handles graceful shutdown of both services on Ctrl+C.
 """
 import os
@@ -9,9 +10,18 @@ import time
 import signal
 import subprocess
 import urllib.request
+import webbrowser
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent
+# When frozen by PyInstaller, sys._MEIPASS holds the bundled resources directory.
+IS_FROZEN = getattr(sys, "frozen", False)
+if IS_FROZEN:
+    BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    BUNDLE_DIR = Path(__file__).resolve().parent
+    APP_DIR = BUNDLE_DIR
+
 BACKEND_HOST = os.environ.get("BACKEND_HOST", "127.0.0.1")
 BACKEND_PORT = int(os.environ.get("BACKEND_PORT", "8000"))
 FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "8501"))
@@ -29,29 +39,66 @@ def wait_for_backend(url: str, timeout: int = 15) -> bool:
     return False
 
 
-def main():
-    os.chdir(ROOT_DIR)
-    sys.path.insert(0, str(ROOT_DIR))
+def run_backend_service():
+    """Direct entrypoint for backend service."""
+    os.chdir(APP_DIR)
+    if str(BUNDLE_DIR) not in sys.path:
+        sys.path.insert(0, str(BUNDLE_DIR))
+    import uvicorn
+    if IS_FROZEN:
+        from backend.app.main import app
+        uvicorn.run(app, host=BACKEND_HOST, port=BACKEND_PORT, log_level="info")
+    else:
+        uvicorn.run(
+            "backend.app.main:app",
+            host=BACKEND_HOST,
+            port=BACKEND_PORT,
+            reload=True,
+            reload_dirs=[str(BUNDLE_DIR / "backend")],
+            log_level="info"
+        )
+
+
+def run_frontend_service():
+    """Direct entrypoint for frontend service."""
+    os.chdir(APP_DIR)
+    if str(BUNDLE_DIR) not in sys.path:
+        sys.path.insert(0, str(BUNDLE_DIR))
+    from streamlit.web import cli as stcli
+    frontend_script = BUNDLE_DIR / "frontend" / "streamlit_app.py"
+    sys.argv = [
+        "streamlit",
+        "run",
+        str(frontend_script),
+        "--global.developmentMode=false",
+        "--server.port",
+        str(FRONTEND_PORT),
+        "--server.headless",
+        "true",
+    ]
+    stcli.main()
+
+
+def supervisor():
+    os.chdir(APP_DIR)
+    if str(BUNDLE_DIR) not in sys.path:
+        sys.path.insert(0, str(BUNDLE_DIR))
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT_DIR)
+    env["PYTHONPATH"] = str(BUNDLE_DIR)
 
     print("=" * 60)
     print("  Starting MARG Pharmaceutical Procurement Agent")
     print("=" * 60)
     print(f"[*] Starting FastAPI backend on http://{BACKEND_HOST}:{BACKEND_PORT} ...")
 
-    # Start FastAPI backend
-    backend_cmd = [
-        sys.executable,
-        "-m",
-        "uvicorn",
-        "backend.app.main:app",
-        "--host",
-        BACKEND_HOST,
-        "--port",
-        str(BACKEND_PORT),
-    ]
+    if IS_FROZEN:
+        backend_cmd = [sys.executable, "--run-backend"]
+        frontend_cmd = [sys.executable, "--run-frontend"]
+    else:
+        launcher_file = str(BUNDLE_DIR / "launcher.py")
+        backend_cmd = [sys.executable, launcher_file, "--run-backend"]
+        frontend_cmd = [sys.executable, launcher_file, "--run-frontend"]
 
     backend_proc = subprocess.Popen(backend_cmd, env=env)
 
@@ -64,20 +111,14 @@ def main():
 
     # Start Streamlit UI
     print(f"[*] Starting Streamlit UI on http://localhost:{FRONTEND_PORT} ...")
-    frontend_script = ROOT_DIR / "frontend" / "streamlit_app.py"
-    frontend_cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(frontend_script),
-        "--server.port",
-        str(FRONTEND_PORT),
-        "--server.headless",
-        "true",
-    ]
-
     frontend_proc = subprocess.Popen(frontend_cmd, env=env)
+
+    # Automatically open browser
+    try:
+        time.sleep(1.5)
+        webbrowser.open(f"http://localhost:{FRONTEND_PORT}")
+    except Exception:
+        pass
 
     def shutdown(signum, frame):
         print("\n[*] Shutting down Procurement Agent services...")
@@ -110,4 +151,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import multiprocessing
+    multiprocessing.freeze_support()
+
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--run-backend":
+            run_backend_service()
+            sys.exit(0)
+        elif sys.argv[1] == "--run-frontend":
+            run_frontend_service()
+            sys.exit(0)
+
+    supervisor()
+

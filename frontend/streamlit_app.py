@@ -26,13 +26,17 @@ except ImportError:
 
 def is_excluded_product(name: str) -> bool:
     """
-    Excludes non-medicine items matching user-blacklisted keywords:
-    'product card', 'visual aid', 'visiting', 'cap', 'cylinder' and summary footer rows.
+    Excludes non-medicine and promotional items matching user-blacklisted keywords:
+    'PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG ', 'product card', 'visual aid', 'visiting', 'cylinder' and summary footer rows.
     """
     if not name:
         return True
-    nl = str(name).lower().replace('-', ' ')
-    blacklist = ['product card', 'visual aid', 'visiting', 'cylinder', 'cap']
+    s_upper = str(name).strip().upper()
+    for kw in ('PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG '):
+        if kw in s_upper:
+            return True
+    nl = s_upper.lower().replace('-', ' ')
+    blacklist = ['product card', 'visual aid', 'visiting', 'cylinder']
     if any(b in nl for b in blacklist):
         return True
     if re.search(r'^\d+\s*items?$', nl.strip()):
@@ -194,10 +198,11 @@ with col_m4:
 st.markdown("---")
 
 # Main Tabs
-tab_upload, tab_proposals, tab_approved, tab_inventory, tab_audit, tab_logs = st.tabs([
+tab_upload, tab_proposals, tab_approved, tab_no_reorder, tab_inventory, tab_audit, tab_logs = st.tabs([
     "📂 Upload MARG Excel & Run",
     "💡 Review & Correct Suggestions",
     "📦 Approved Orders / PO Export",
+    "🛡️ No Need for Reorder",
     "📊 Inventory & FEFO Expiry",
     "📜 Compliance Audit Log",
     "📋 Live Rolling Logs"
@@ -308,7 +313,7 @@ with tab_upload:
                                 upload_res = requests.post(
                                     f"{BACKEND_URL}/ingestion/upload-marg-excel?run_agent={'true' if should_run_agent else 'false'}&lead_time_days={int(config_lead_time)}&clear_existing={'true' if should_clear else 'false'}",
                                     files=files,
-                                    timeout=60
+                                    timeout=300
                                 )
                                 if upload_res.status_code == 200:
                                     success_files += 1
@@ -455,8 +460,24 @@ with tab_proposals:
             ])
             st.dataframe(df_prop_summary, use_container_width=True)
 
-        # Build supplier lookup options safely
-        supplier_options = {s['supplier_id']: f"{s['supplier_name']} ({s['supplier_id']})" for s in suppliers_list}
+        # Refresh supplier lookup options from backend so fresh uploads are immediately reflected
+        if is_healthy:
+            try:
+                s_res = requests.get(f"{BACKEND_URL}/suppliers", timeout=5)
+                if s_res.status_code == 200:
+                    suppliers_list = s_res.json()
+            except Exception:
+                pass
+
+        # Sort suppliers alphabetically by supplier name
+        valid_suppliers = [
+            s for s in suppliers_list
+            if s.get('supplier_name') and str(s.get('supplier_name', '')).strip().upper() not in (
+                'BILL DATE', 'SUPPLIER', 'SUPPLIER NAME', 'TOTAL', 'NAN', 'NONE'
+            )
+        ]
+        valid_suppliers.sort(key=lambda s: str(s.get('supplier_name', '')).strip().upper())
+        supplier_options = {s['supplier_id']: s['supplier_name'] for s in valid_suppliers}
         if not supplier_options:
             supplier_options = {"SUP-DEFAULT": "Default Trade Supplier"}
 
@@ -525,8 +546,11 @@ with tab_proposals:
 
                     with col_edit2:
                         # Correct supplier safely
-                        sup_keys = list(supplier_options.keys())
                         current_sup_id = p.get('supplier_id')
+                        current_sup_name = p.get('supplier_name')
+                        if current_sup_id and current_sup_id not in supplier_options:
+                            supplier_options[current_sup_id] = current_sup_name or current_sup_id
+                        sup_keys = list(supplier_options.keys())
                         default_idx = sup_keys.index(current_sup_id) if (current_sup_id and current_sup_id in sup_keys) else 0
 
                         corrected_supplier_id = st.selectbox(
@@ -662,6 +686,171 @@ with tab_approved:
                 mime="text/csv",
                 use_container_width=True
             )
+
+
+# ---------------------------------------------------------------------------
+# TAB: No Need for Reorder (Net Need <= 0)
+# ---------------------------------------------------------------------------
+with tab_no_reorder:
+    st.subheader("🛡️ Products with No Need for Reorder (Net Need ≤ 0)")
+    st.markdown("""
+    These pharmaceutical products currently have **sufficient usable stock on hand and pending orders** to cover forecasted customer demand across the entire delivery lead time, review cycle, and safety buffer.
+    """)
+
+    # Fetch no-reorder list directly from backend (runs in ~20ms, always live)
+    no_reorder_items = []
+    if is_healthy:
+        try:
+            nr_res = requests.get(
+                f"{BACKEND_URL}/procurement/no-reorder",
+                params={"lead_time_days": int(config_lead_time)},
+                timeout=20
+            )
+            if nr_res.status_code == 200:
+                no_reorder_items = nr_res.json()
+        except Exception as e:
+            st.warning(f"Could not load no-reorder data: {e}")
+
+    # Exclude blacklisted non-medicine items (PACKING, PEN-, PILLOW, BAG-, etc.)
+    no_reorder_items = [p for p in no_reorder_items if not is_excluded_product(p.get('product_name', ''))]
+
+    # Total list number
+    total_no_reorder_count = len(no_reorder_items)
+
+    # Top Metrics Bar
+    if total_no_reorder_count > 0:
+        total_healthy_val = sum(p.get('inventory_value', 0.0) for p in no_reorder_items)
+        avg_cov_days = sum(min(p.get('coverage_days', 0.0), 365.0) for p in no_reorder_items) / total_no_reorder_count
+        zero_risk_count = sum(1 for p in no_reorder_items if p.get('expiry_risk_score', 0.0) == 0.0)
+
+        col_nr1, col_nr2, col_nr3, col_nr4 = st.columns(4)
+        with col_nr1:
+            st.metric("Total Products Not Needing Reorder", total_no_reorder_count)
+        with col_nr2:
+            st.metric("Capital in Healthy Stock", f"₹{total_healthy_val:,.2f}")
+        with col_nr3:
+            st.metric("Avg Inventory Coverage", f"{avg_cov_days:.1f} days")
+        with col_nr4:
+            st.metric("100% FEFO Healthy", f"{zero_risk_count / total_no_reorder_count:.0%}")
+
+    st.markdown("---")
+
+    # Search Bar with dedicated Search and Reset Buttons
+    st.markdown("##### 🔍 Search & Filter Products")
+    col_s1, col_s2, col_s3 = st.columns([3, 1, 1])
+
+    with col_s1:
+        search_kw = st.text_input(
+            "Search product by name or item code",
+            value="",
+            placeholder="Type medicine name or code (e.g. GINIPLEX, AC-BEN, MED-...)",
+            label_visibility="collapsed",
+            key="input_search_no_reorder"
+        ).strip().lower()
+
+    with col_s2:
+        st.button("🔍 Search Product", type="primary", use_container_width=True, key="btn_do_search_no_reorder")
+
+    with col_s3:
+        if st.button("🔄 Show All Products", use_container_width=True, key="btn_clear_search_no_reorder"):
+            search_kw = ""
+            st.rerun()
+
+    # Active search filter
+    if search_kw:
+        display_items = [
+            p for p in no_reorder_items
+            if search_kw in p.get('product_name', '').lower() or search_kw in p.get('product_code', '').lower()
+        ]
+    else:
+        display_items = list(no_reorder_items)
+
+    # Ensure ordered by character (alphabetical order A-Z by product_name)
+    display_items.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
+
+    # Total List Number Display
+    if search_kw:
+        st.info(f"📋 **Total List Count**: Showing **{len(display_items)}** products matching `'{search_kw}'` (out of **{total_no_reorder_count}** total products with Net Need ≤ 0).")
+    else:
+        st.info(f"📋 **Total List Count**: Showing all **{total_no_reorder_count}** products with Net Need ≤ 0 in alphabetical order (A–Z). No reorder needed.")
+
+    if not display_items:
+        if search_kw:
+            st.warning(f"No products found matching '{search_kw}'. Try a different keyword or click 'Show All Products'.")
+        else:
+            st.info("No products currently have Net Need ≤ 0. Run the procurement agent after uploading stock and sales data.")
+    else:
+        # Direct summary table view (always visible)
+        df_no_reorder = pd.DataFrame([
+            {
+                'Product Name': p['product_name'],
+                'Product Code': p['product_code'],
+                'Stock on Hand': p['stock_on_hand'],
+                'Usable Stock (FEFO)': p['usable_before_expiry'],
+                'On Order': p['stock_on_order'],
+                'Daily Demand': p['avg_daily_demand'],
+                'Target Required': p['target_stock'],
+                'Net Need': f"{p['net_need']:.2f}",
+                'Surplus Units': f"+{p['surplus_qty']:.2f}",
+                'Coverage (Days)': f"{p['coverage_days']:.1f}d" if p['coverage_days'] < 999 else "No Demand",
+                'Unit Cost (₹)': p['unit_cost'],
+                'Total Stock Value (₹)': p['inventory_value'],
+                'Status': "✅ Covered (No Reorder)",
+            }
+            for p in display_items
+        ])
+
+        st.dataframe(df_no_reorder, use_container_width=True, hide_index=True)
+
+        col_dn1, col_dn2 = st.columns([1, 4])
+        with col_dn1:
+            csv_nr = df_no_reorder.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download CSV List",
+                data=csv_nr,
+                file_name="products_no_need_for_reorder.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        # Pagination for individual product review
+        items_per_page_nr = 25
+        total_pages_nr = max(1, (len(display_items) + items_per_page_nr - 1) // items_per_page_nr)
+
+        col_pg1, col_pg2, col_pg3 = st.columns([1, 2, 1])
+        with col_pg2:
+            page_nr = st.number_input(
+                "Page",
+                min_value=1,
+                max_value=total_pages_nr,
+                value=1,
+                step=1,
+                key="no_reorder_page_num"
+            )
+            st.caption(f"Showing page {page_nr} of {total_pages_nr} ({len(display_items)} products in alphabetical order)")
+
+        start_idx_nr = (page_nr - 1) * items_per_page_nr
+        end_idx_nr = min(start_idx_nr + items_per_page_nr, len(display_items))
+        page_items_nr = display_items[start_idx_nr:end_idx_nr]
+
+        for p in page_items_nr:
+            with st.expander(
+                f"**{p['product_name']}** (`{p['product_code']}`) — Stock on Hand: **{p['stock_on_hand']:g} units** (Surplus: +{p['surplus_qty']:g} units) | Net Need: **{p['net_need']:g}**",
+                expanded=False
+            ):
+                st.markdown(f"**Agent Rationale:** {p['rationale']}")
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Stock on Hand", f"{p['stock_on_hand']:g}")
+                c2.metric("Usable (FEFO)", f"{p['usable_before_expiry']:g}")
+                c3.metric("Stock on Order", f"{p['stock_on_order']:g}")
+                c4.metric("Avg Daily Demand", f"{p['avg_daily_demand']:.2f}/day")
+                c5.metric("Target Stock Needed", f"{p['target_stock']:g}")
+
+                c6, c7, c8, c9 = st.columns(4)
+                c6.metric("Net Need", f"{p['net_need']:g} units", delta=f"{p['net_need']:g} (No Reorder)")
+                c7.metric("Surplus Stock", f"+{p['surplus_qty']:g} units")
+                c8.metric("Days Coverage", f"{p['coverage_days']:.1f} days" if p['coverage_days'] < 999 else "No Demand")
+                c9.metric("Stock Capital", f"₹{p['inventory_value']:,.2f}")
 
 
 # ---------------------------------------------------------------------------

@@ -72,12 +72,31 @@ def health():
 # ---------------------------------------------------------------------------
 @app.get('/products', tags=['products'])
 def list_products(db: Session = Depends(get_db)):
+    """
+    Retrieve all registered canonical products from the database.
+
+    Returns:
+        list[dict]: List of product metadata dictionaries.
+    """
     products = db.scalars(select(Product)).all()
     return [_product_dict(p) for p in products]
 
 
 @app.get('/products/{product_code}', tags=['products'])
 def get_product(product_code: str, db: Session = Depends(get_db)):
+    """
+    Fetch a single product record by its unique product code.
+
+    Args:
+        product_code (str): Unique canonical product code identifier.
+        db (Session): Database session.
+
+    Returns:
+        dict: Product details.
+
+    Raises:
+        HTTPException: 404 if the product is not found.
+    """
     p = db.get(Product, product_code)
     if not p:
         raise HTTPException(status_code=404, detail='Product not found.')
@@ -85,6 +104,15 @@ def get_product(product_code: str, db: Session = Depends(get_db)):
 
 
 def _product_dict(p: Product) -> dict:
+    """
+    Convert a Product ORM entity into a JSON-serializable dictionary.
+
+    Args:
+        p (Product): Product entity instance.
+
+    Returns:
+        dict: Serialized product fields.
+    """
     return {
         'product_code': p.product_code,
         'product_name': p.product_name,
@@ -103,11 +131,26 @@ def _product_dict(p: Product) -> dict:
 # ---------------------------------------------------------------------------
 @app.get('/suppliers', tags=['suppliers'])
 def list_suppliers(db: Session = Depends(get_db)):
+    """
+    Retrieve all vendors and suppliers saved in the database.
+
+    Returns:
+        list[dict]: List of serialized supplier objects.
+    """
     suppliers = db.scalars(select(Supplier)).all()
     return [_supplier_dict(s) for s in suppliers]
 
 
 def _supplier_dict(s: Supplier) -> dict:
+    """
+    Convert a Supplier ORM entity into a JSON-serializable dictionary.
+
+    Args:
+        s (Supplier): Supplier entity instance.
+
+    Returns:
+        dict: Serialized supplier fields.
+    """
     return {
         'supplier_id': s.supplier_id,
         'supplier_name': s.supplier_name,
@@ -136,6 +179,12 @@ def trigger_run(req: RunRequest = RunRequest(), db: Session = Depends(get_db)):
 
 @app.get('/runs', tags=['agent'])
 def list_runs(db: Session = Depends(get_db)):
+    """
+    List all historical procurement agent runs ordered by recency.
+
+    Returns:
+        list[dict]: List of run summaries including run_id, status, and proposal counts.
+    """
     runs = db.scalars(select(ProcurementRun).order_by(ProcurementRun.started_at.desc())).all()
     return [
         {
@@ -148,12 +197,39 @@ def list_runs(db: Session = Depends(get_db)):
         for r in runs
     ]
 
+@app.get('/procurement/no-reorder', tags=['agent'])
+def list_no_reorder_products(
+    lead_time_days: Optional[int] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Returns active products with Net Need <= 0, ordered alphabetically by character.
+    Supports optional search filtering.
+    """
+    agent = ProcurementAgent(db)
+    items = agent.get_no_reorder_products(lead_time_override=lead_time_days)
+    if search:
+        s_low = search.strip().lower()
+        items = [
+            i for i in items
+            if s_low in i['product_name'].lower() or s_low in i['product_code'].lower()
+        ]
+    return items
 
-# ---------------------------------------------------------------------------
-# Proposals
 # ---------------------------------------------------------------------------
 @app.get('/proposals', tags=['proposals'])
 def list_proposals(status_filter: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Retrieve procurement proposals optionally filtered by lifecycle status.
+
+    Args:
+        status_filter (Optional[str]): Optional filter (e.g. 'PENDING', 'APPROVED', 'REJECTED').
+        db (Session): Database session.
+
+    Returns:
+        list[dict]: List of proposal records ordered alphabetically by product name.
+    """
     stmt = select(ProcurementProposal).order_by(ProcurementProposal.product_name.asc())
     if status_filter:
         stmt = stmt.where(ProcurementProposal.status == status_filter.upper())
@@ -163,6 +239,19 @@ def list_proposals(status_filter: Optional[str] = None, db: Session = Depends(ge
 
 @app.get('/proposals/{proposal_id}', tags=['proposals'])
 def get_proposal(proposal_id: int, db: Session = Depends(get_db)):
+    """
+    Fetch a single procurement proposal by its unique ID.
+
+    Args:
+        proposal_id (int): Primary key ID of the proposal.
+        db (Session): Database session.
+
+    Returns:
+        dict: Serialized proposal details.
+
+    Raises:
+        HTTPException: 404 if the proposal does not exist.
+    """
     p = db.get(ProcurementProposal, proposal_id)
     if not p:
         raise HTTPException(status_code=404, detail='Proposal not found.')
@@ -170,6 +259,15 @@ def get_proposal(proposal_id: int, db: Session = Depends(get_db)):
 
 
 def _proposal_dict(p: ProcurementProposal) -> dict:
+    """
+    Convert a ProcurementProposal ORM entity into a serializable dictionary.
+
+    Args:
+        p (ProcurementProposal): Proposal entity instance.
+
+    Returns:
+        dict: Detailed proposal properties for UI consumption.
+    """
     return {
         'id': p.id,
         'run_id': p.run_id,
@@ -272,6 +370,16 @@ def batch_decide_proposals(req: BatchDecisionRequest, db: Session = Depends(get_
 # ---------------------------------------------------------------------------
 @app.get('/audit', tags=['audit'])
 def list_audit(limit: int = 100, db: Session = Depends(get_db)):
+    """
+    Retrieve recent immutable audit events for tracking decisions, runs, and executions.
+
+    Args:
+        limit (int): Maximum number of log events to return (default 100).
+        db (Session): Database session.
+
+    Returns:
+        list[dict]: List of audit entries sorted newest-first.
+    """
     events = db.scalars(
         select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)
     ).all()
@@ -294,6 +402,12 @@ def list_audit(limit: int = 100, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @app.get('/inventory', tags=['inventory'])
 def list_inventory(db: Session = Depends(get_db)):
+    """
+    Fetch all inventory batch records joined with product metadata.
+
+    Returns:
+        list[dict]: List of batch positions including batch number, quantities, and expiry dates.
+    """
     query = (
         select(InventoryBatch, Product.product_name, Product.category)
         .outerjoin(Product, InventoryBatch.product_code == Product.product_code)

@@ -38,7 +38,10 @@ def build():
         f"--add-data=backend{sep}backend",
         f"--add-data=frontend{sep}frontend",
         f"--add-data={streamlit_path}{sep}streamlit",
+        # Copy metadata
+        "--copy-metadata=streamlit",
         # Hidden imports
+        "--hidden-import=streamlit.web.cli",
         "--hidden-import=uvicorn.logging",
         "--hidden-import=uvicorn.loops",
         "--hidden-import=uvicorn.loops.auto",
@@ -69,6 +72,19 @@ def build():
     target_dist = dist_dir / "procurement-agent"
     if (ROOT_DIR / ".env.example").exists() and target_dist.exists():
         shutil.copy(ROOT_DIR / ".env.example", target_dist / ".env.example")
+        if not (target_dist / ".env").exists():
+            shutil.copy(ROOT_DIR / ".env.example", target_dist / ".env")
+
+    # Create double-clickable launchers in dist
+    mac_launcher = target_dist / "start_mac.command"
+    mac_launcher.write_text("#!/bin/bash\ncd \"$(dirname \"$0\")\"\n./procurement-agent\n")
+    try:
+        os.chmod(mac_launcher, 0o755)
+    except Exception:
+        pass
+
+    win_launcher = target_dist / "start_windows.bat"
+    win_launcher.write_text("@echo off\ncd /d \"%~dp0\"\nprocurement-agent.exe\npause\n")
 
     print("=" * 60)
     print(f"[+] Build successful! Output directory: {target_dist}")
