@@ -1,0 +1,190 @@
+name: CI/CD Pipeline & Executable Release
+
+on:
+  push:
+    branches: [main, DeepDrive]
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------
+  # 1. Code Quality & Linting
+  # -------------------------------------------------------------
+  quality:
+    name: Lint & Code Style
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Dependencies
+        run: uv sync --all-groups
+
+      - name: Check Formatting & Linting
+        run: |
+          uv run ruff check .
+          uv run ruff format --check . || true
+
+  # -------------------------------------------------------------
+  # 2. Automated Test Suite
+  # -------------------------------------------------------------
+  test:
+    name: Run Test Suite
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Dependencies
+        run: uv sync --all-groups
+
+      - name: Run Pytest
+        run: uv run pytest -v
+
+  # -------------------------------------------------------------
+  # 3. Build Standalone Executables (Multi-OS Matrix)
+  # -------------------------------------------------------------
+  build-executable:
+    name: Build Binary (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: procurement-agent-linux-x86_64
+            archive_ext: tar.gz
+          - os: macos-latest
+            artifact_name: procurement-agent-macos-arm64
+            archive_ext: tar.gz
+          - os: windows-latest
+            artifact_name: procurement-agent-windows-x64
+            archive_ext: zip
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Dependencies & PyInstaller
+        run: uv sync --all-groups
+
+      - name: Build Executable
+        run: uv run python scripts/build_executable.py
+
+      - name: Compress Executable Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd dist
+          tar -czf ../${{ matrix.artifact_name }}.tar.gz procurement-agent
+
+      - name: Compress Executable Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd dist
+          Compress-Archive -Path procurement-agent -DestinationPath ..\${{ matrix.artifact_name }}.zip
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
+          retention-days: 14
+
+  # -------------------------------------------------------------
+  # 4. Docker Container Build & Verify
+  # -------------------------------------------------------------
+  docker-build:
+    name: Verify Docker Container Build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: procurement-agent:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------
+  # 5. Create GitHub Release (Triggered on Tags: v*.*.*)
+  # -------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-executable, docker-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Linux Executable
+        uses: actions/download-artifact@v4
+        with:
+          name: procurement-agent-linux-x86_64
+
+      - name: Download macOS Executable
+        uses: actions/download-artifact@v4
+        with:
+          name: procurement-agent-macos-arm64
+
+      - name: Download Windows Executable
+        uses: actions/download-artifact@v4
+        with:
+          name: procurement-agent-windows-x64
+
+      - name: Create GitHub Release with Executables
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            procurement-agent-linux-x86_64.tar.gz
+            procurement-agent-macos-arm64.tar.gz
+            procurement-agent-windows-x64.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true

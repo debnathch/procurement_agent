@@ -20,6 +20,8 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "ruff>=0.4.0",
+    "pyinstaller>=6.5.0",
 ]
 
 [tool.uv]
@@ -28,3 +30,23 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # line too long
+    "E402",  # module level import not at top of file
+    "E701",  # multiple statements on one line (colon)
+    "E702",  # multiple statements on one line (semicolon)
+    "E712",  # comparison to True/False (needed for SQLAlchemy binary expressions)
+    "F401",  # imported but unused
+    "F841",  # local variable assigned but never used
+    "W293",  # blank line contains whitespace
+    "W291",  # trailing whitespace
+    "F541",  # f-string without placeholders
+]
+
