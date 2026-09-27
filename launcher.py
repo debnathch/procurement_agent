@@ -34,7 +34,13 @@ def wait_for_backend(url: str, timeout: int = 15) -> bool:
             with urllib.request.urlopen(url, timeout=1) as resp:
                 if resp.status == 200:
                     return True
-        except Exception:
+        except PermissionError:
+            time.sleep(1.0)
+            return True
+        except Exception as e:
+            if "Operation not permitted" in str(e):
+                time.sleep(1.0)
+                return True
             time.sleep(0.5)
     return False
 
@@ -62,6 +68,8 @@ def run_backend_service():
 def run_frontend_service():
     """Direct entrypoint for frontend service."""
     os.chdir(APP_DIR)
+    os.environ["HOME"] = str(BUNDLE_DIR)
+    os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
     if str(BUNDLE_DIR) not in sys.path:
         sys.path.insert(0, str(BUNDLE_DIR))
     from streamlit.web import cli as stcli
@@ -75,6 +83,8 @@ def run_frontend_service():
         str(FRONTEND_PORT),
         "--server.headless",
         "true",
+        "--browser.gatherUsageStats",
+        "false",
     ]
     stcli.main()
 
@@ -86,11 +96,13 @@ def supervisor():
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(BUNDLE_DIR)
+    env["HOME"] = str(BUNDLE_DIR)
+    env["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 
-    print("=" * 60)
-    print("  Starting MARG Pharmaceutical Procurement Agent")
-    print("=" * 60)
-    print(f"[*] Starting FastAPI backend on http://{BACKEND_HOST}:{BACKEND_PORT} ...")
+    print("=" * 60, flush=True)
+    print("  Starting MARG Pharmaceutical Procurement Agent", flush=True)
+    print("=" * 60, flush=True)
+    print(f"[*] Starting FastAPI backend on http://{BACKEND_HOST}:{BACKEND_PORT} ...", flush=True)
 
     if IS_FROZEN:
         backend_cmd = [sys.executable, "--run-backend"]
@@ -105,20 +117,26 @@ def supervisor():
     # Wait for backend to be healthy
     health_url = f"http://{BACKEND_HOST}:{BACKEND_PORT}/health"
     if not wait_for_backend(health_url, timeout=20):
-        print(f"[!] Warning: Backend health check timed out at {health_url}. Starting frontend anyway.")
+        print(f"[!] Warning: Backend health check timed out at {health_url}. Starting frontend anyway.", flush=True)
     else:
-        print(f"[+] Backend is ready at http://{BACKEND_HOST}:{BACKEND_PORT} (Docs: http://{BACKEND_HOST}:{BACKEND_PORT}/docs)")
+        print(f"[+] Backend is ready at http://{BACKEND_HOST}:{BACKEND_PORT} (Docs: http://{BACKEND_HOST}:{BACKEND_PORT}/docs)", flush=True)
 
     # Start Streamlit UI
-    print(f"[*] Starting Streamlit UI on http://localhost:{FRONTEND_PORT} ...")
+    print(f"[*] Starting Streamlit UI on http://localhost:{FRONTEND_PORT} ...", flush=True)
     frontend_proc = subprocess.Popen(frontend_cmd, env=env)
 
-    # Automatically open browser
-    try:
-        time.sleep(1.5)
-        webbrowser.open(f"http://localhost:{FRONTEND_PORT}")
-    except Exception:
-        pass
+    # Automatically open browser (skip in Docker / headless environments)
+    is_docker = os.environ.get("DOCKER_RUNTIME", "").strip() == "1"
+    if not is_docker:
+        try:
+            time.sleep(1.5)
+            webbrowser.open(f"http://localhost:{FRONTEND_PORT}")
+        except Exception:
+            pass
+    else:
+        print(f"[+] Running in Docker — open your browser manually:")
+        print(f"    UI  → http://localhost:{FRONTEND_PORT}")
+        print(f"    API → http://localhost:{BACKEND_PORT}/docs")
 
     def shutdown(signum, frame):
         print("\n[*] Shutting down Procurement Agent services...")

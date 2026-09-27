@@ -201,6 +201,7 @@ def list_runs(db: Session = Depends(get_db)):
 def list_no_reorder_products(
     lead_time_days: Optional[int] = None,
     search: Optional[str] = None,
+    company: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -209,6 +210,8 @@ def list_no_reorder_products(
     """
     agent = ProcurementAgent(db)
     items = agent.get_no_reorder_products(lead_time_override=lead_time_days)
+    if company and company.lower() != 'all companies':
+        items = [i for i in items if (i.get('company') or '').lower() == company.lower()]
     if search:
         s_low = search.strip().lower()
         items = [
@@ -219,12 +222,17 @@ def list_no_reorder_products(
 
 # ---------------------------------------------------------------------------
 @app.get('/proposals', tags=['proposals'])
-def list_proposals(status_filter: Optional[str] = None, db: Session = Depends(get_db)):
+def list_proposals(
+    status_filter: Optional[str] = None,
+    company: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """
     Retrieve procurement proposals optionally filtered by lifecycle status.
 
     Args:
         status_filter (Optional[str]): Optional filter (e.g. 'PENDING', 'APPROVED', 'REJECTED').
+        company (Optional[str]): Optional company filter.
         db (Session): Database session.
 
     Returns:
@@ -233,6 +241,8 @@ def list_proposals(status_filter: Optional[str] = None, db: Session = Depends(ge
     stmt = select(ProcurementProposal).order_by(ProcurementProposal.product_name.asc())
     if status_filter:
         stmt = stmt.where(ProcurementProposal.status == status_filter.upper())
+    if company and company.lower() != 'all companies':
+        stmt = stmt.where(ProcurementProposal.company == company)
     proposals = db.scalars(stmt).all()
     return [_proposal_dict(p) for p in proposals]
 
@@ -273,6 +283,7 @@ def _proposal_dict(p: ProcurementProposal) -> dict:
         'run_id': p.run_id,
         'product_code': p.product_code,
         'product_name': p.product_name,
+        'company': p.company or 'General',
         'supplier_id': p.supplier_id,
         'supplier_name': p.supplier_name,
         'recommended_qty': p.recommended_qty,
@@ -409,7 +420,7 @@ def list_inventory(db: Session = Depends(get_db)):
         list[dict]: List of batch positions including batch number, quantities, and expiry dates.
     """
     query = (
-        select(InventoryBatch, Product.product_name, Product.category)
+        select(InventoryBatch, Product.product_name, Product.category, Product.company)
         .outerjoin(Product, InventoryBatch.product_code == Product.product_code)
         .order_by(Product.product_name, InventoryBatch.batch_no)
     )
@@ -420,13 +431,14 @@ def list_inventory(db: Session = Depends(get_db)):
             'product_code': b.product_code,
             'product_name': product_name or b.product_code,
             'category': category or 'General',
+            'company': b.company or prod_company or 'General',
             'batch_no': b.batch_no,
             'qty_on_hand': b.qty_on_hand,
             'qty_on_order': b.qty_on_order,
             'expiry_date': b.expiry_date.strftime('%Y-%m-%d') if b.expiry_date else None,
             'unit_cost': b.unit_cost,
         }
-        for b, product_name, category in rows
+        for b, product_name, category, prod_company in rows
     ]
 
 

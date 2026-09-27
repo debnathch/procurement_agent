@@ -34,6 +34,7 @@ class Product(Base):
     product_code: Mapped[str] = mapped_column(String(64), primary_key=True)
     product_name: Mapped[str] = mapped_column(String(256), nullable=False)
     category: Mapped[str | None] = mapped_column(String(128))
+    company: Mapped[str | None] = mapped_column(String(256))
     unit: Mapped[str] = mapped_column(String(32), default='units')
     pack_size: Mapped[float] = mapped_column(Float, default=1.0)
     min_order_qty: Mapped[float] = mapped_column(Float, default=1.0)
@@ -86,6 +87,7 @@ class InventoryBatch(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     product_code: Mapped[str] = mapped_column(String(64), ForeignKey('products.product_code'), nullable=False)
     batch_no: Mapped[str | None] = mapped_column(String(64))
+    company: Mapped[str | None] = mapped_column(String(256))
     qty_on_hand: Mapped[float] = mapped_column(Float, default=0.0)
     qty_on_order: Mapped[float] = mapped_column(Float, default=0.0)
     expiry_date: Mapped[datetime | None] = mapped_column(DateTime)
@@ -159,6 +161,7 @@ class ProcurementProposal(Base):
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
     product_code: Mapped[str] = mapped_column(String(64), nullable=False)
     product_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    company: Mapped[str | None] = mapped_column(String(256))
     supplier_id: Mapped[str | None] = mapped_column(String(64))
     supplier_name: Mapped[str | None] = mapped_column(String(256))
 

@@ -74,14 +74,14 @@ class DemandService:
             return round(avg_daily, 4), f'sales_history_{lookback_days}d'
 
         # Fallback 0: Check sales history across canonical product name variants
-        from backend.app.adapters.excel import canonical_medicine_key
+        from backend.app.adapters.excel import pharma_canonical_key
         prod = self.db.get(Product, product_code)
         if prod:
-            c_key = canonical_medicine_key(prod.product_name)
+            c_key = pharma_canonical_key(prod.product_name)
             all_prods = self.db.scalars(select(Product)).all()
             alt_codes = [
                 p.product_code for p in all_prods
-                if canonical_medicine_key(p.product_name) == c_key and p.product_code != product_code
+                if pharma_canonical_key(p.product_name) == c_key and p.product_code != product_code
             ]
             if alt_codes:
                 alt_res = self.db.execute(

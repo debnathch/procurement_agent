@@ -197,12 +197,43 @@ with col_m4:
 
 st.markdown("---")
 
+# Check session state for company filters to showcase live row counts on tab labels
+active_prop_company = st.session_state.get("proposal_company_filter", "All Companies")
+active_nr_company = st.session_state.get("no_reorder_company_filter", "All Companies")
+
+if active_prop_company and active_prop_company != "All Companies":
+    prop_tab_count = sum(1 for p in valid_proposals if p.get('company') == active_prop_company)
+else:
+    prop_tab_count = len(valid_proposals)
+
+# Pre-fetch no-reorder count for tab title
+no_reorder_preview = []
+if is_healthy:
+    try:
+        nr_prev_res = requests.get(
+            f"{BACKEND_URL}/procurement/no-reorder",
+            params={"lead_time_days": int(config_lead_time)},
+            timeout=3
+        )
+        if nr_prev_res.status_code == 200:
+            no_reorder_preview = [p for p in nr_prev_res.json() if not is_excluded_product(p.get('product_name', ''))]
+    except Exception:
+        pass
+
+if active_nr_company and active_nr_company != "All Companies":
+    nr_tab_count = sum(1 for p in no_reorder_preview if p.get('company') == active_nr_company)
+else:
+    nr_tab_count = len(no_reorder_preview)
+
+tab_proposals_label = f"💡 Review & Correct Suggestions ({prop_tab_count})"
+tab_no_reorder_label = f"🛡️ No Need for Reorder ({nr_tab_count})"
+
 # Main Tabs
 tab_upload, tab_proposals, tab_approved, tab_no_reorder, tab_inventory, tab_audit, tab_logs = st.tabs([
     "📂 Upload MARG Excel & Run",
-    "💡 Review & Correct Suggestions",
+    tab_proposals_label,
     "📦 Approved Orders / PO Export",
-    "🛡️ No Need for Reorder",
+    tab_no_reorder_label,
     "📊 Inventory & FEFO Expiry",
     "📜 Compliance Audit Log",
     "📋 Live Rolling Logs"
@@ -352,10 +383,37 @@ with tab_proposals:
     **You have full control to correct any value (quantity, supplier, notes) before approving.**
     """)
 
-    col_ref, col_filt, col_risk, col_search = st.columns([1, 1.5, 2, 2.5])
+    col_ref, col_comp, col_filt, col_risk = st.columns([1, 2, 1.5, 2])
     with col_ref:
         if st.button("🔄 Refresh Data", key="refresh_proposals_btn"):
             st.rerun()
+
+    # Fetch proposals from backend
+    raw_proposals = []
+    if is_healthy:
+        try:
+            p_res = requests.get(f"{BACKEND_URL}/proposals", timeout=10)
+            if p_res.status_code == 200:
+                raw_proposals = p_res.json()
+        except Exception as e:
+            st.error(f"Error loading proposals: {e}")
+
+    # Filter out blacklisted non-medicine items
+    raw_proposals = [p for p in raw_proposals if not is_excluded_product(p.get('product_name', ''))]
+
+    # Compute company list from raw proposals
+    available_companies = sorted(list({p.get('company') for p in raw_proposals if p.get('company') and p.get('company') != 'None'}))
+    company_counts = {c: sum(1 for p in raw_proposals if p.get('company') == c) for c in available_companies}
+    company_options = ["All Companies"] + available_companies
+
+    with col_comp:
+        selected_company = st.selectbox(
+            "🏢 Filter by Company",
+            options=company_options,
+            format_func=lambda c: f"{c} ({company_counts.get(c, len(raw_proposals))} rows)" if c != "All Companies" else f"All Companies ({len(raw_proposals)} rows)",
+            key="proposal_company_filter",
+            help="Filter recommendations by pharmaceutical company"
+        )
 
     with col_filt:
         status_filter = st.selectbox("Filter Status", ["PENDING", "APPROVED_PENDING_EXECUTION", "EXECUTED", "REJECTED", "ALL"])
@@ -366,24 +424,13 @@ with tab_proposals:
             ["All Risk Levels", "⚠️ Near-Expiry / Risk Products Only", "⛔ High Risk Only (PAUSE/REDUCE)"]
         )
 
-    # Fetch proposals
-    current_proposals = []
-    if is_healthy:
-        try:
-            url = f"{BACKEND_URL}/proposals"
-            if status_filter != "ALL":
-                url += f"?status_filter={status_filter}"
-            p_res = requests.get(url, timeout=10)
-            if p_res.status_code == 200:
-                current_proposals = p_res.json()
-        except Exception as e:
-            st.error(f"Error loading proposals: {e}")
+    # Apply Filters
+    current_proposals = list(raw_proposals)
+    if selected_company != "All Companies":
+        current_proposals = [p for p in current_proposals if p.get('company') == selected_company]
 
-    with col_search:
-        search_kw = st.text_input("🔍 Search by Product or Code", "", key="proposal_search_kw")
-
-    # Filter out blacklisted non-medicine items
-    current_proposals = [p for p in current_proposals if not is_excluded_product(p.get('product_name', ''))]
+    if status_filter != "ALL":
+        current_proposals = [p for p in current_proposals if p.get('status') == status_filter]
 
     # Apply Expiry Risk Filter
     if risk_filter == "⚠️ Near-Expiry / Risk Products Only":
@@ -400,22 +447,51 @@ with tab_proposals:
     # Sort alphabetically by product name (A-Z)
     current_proposals.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
 
+    # Dynamic Search placeholder reflecting row count and selected company
+    search_placeholder = f"Search within {len(current_proposals)} rows for {selected_company} (product name or code)..."
+    col_search, col_clear_search = st.columns([4, 1])
+    with col_search:
+        search_kw = st.text_input(
+            "🔍 Search within proposals",
+            value="",
+            placeholder=search_placeholder,
+            label_visibility="collapsed",
+            key="proposal_search_kw"
+        ).strip().lower()
+    with col_clear_search:
+        if st.button("🔄 Reset Search", use_container_width=True, key="proposal_reset_search_btn"):
+            search_kw = ""
+            st.rerun()
+
     if search_kw:
         current_proposals = [
             p for p in current_proposals
-            if search_kw.lower() in p.get('product_name', '').lower() or search_kw.lower() in p.get('product_code', '').lower()
+            if search_kw in p.get('product_name', '').lower() or search_kw in p.get('product_code', '').lower()
         ]
 
+    # Showcase number of rows in the tab as well as active filter status
+    st.info(
+        f"📋 **Showing {len(current_proposals)} row(s)** in Review & Correct Suggestions "
+        f"(Filtered by Company: **{selected_company}** | Status: **{status_filter}** | Expiry: **{risk_filter}** | Out of {len(raw_proposals)} total)"
+    )
+
     if not current_proposals:
-        st.info("No proposals found for the selected filter. Upload a MARG Excel or click below to trigger a run:")
-        if st.button("⚡ Run Procurement Agent Now", key="trigger_run_btn"):
-            if is_healthy:
-                r_res = requests.post(f"{BACKEND_URL}/runs", json={"lead_time_days": int(config_lead_time)}, timeout=30)
-                if r_res.status_code == 201:
-                    st.success("Procurement Run finished!")
-                    st.rerun()
-                else:
-                    st.error(f"Run failed: {r_res.text}")
+        if selected_company != "All Companies" or search_kw:
+            st.warning(
+                f"No proposal rows found matching company '{selected_company}'"
+                + (f" with keyword '{search_kw}'" if search_kw else "")
+                + " (0 rows displayed). Select 'All Companies' or clear search to view more rows."
+            )
+        else:
+            st.info("No proposals found for the selected filter. Upload a MARG Excel or click below to trigger a run:")
+            if st.button("⚡ Run Procurement Agent Now", key="trigger_run_btn"):
+                if is_healthy:
+                    r_res = requests.post(f"{BACKEND_URL}/runs", json={"lead_time_days": int(config_lead_time)}, timeout=30)
+                    if r_res.status_code == 201:
+                        st.success("Procurement Run finished!")
+                        st.rerun()
+                    else:
+                        st.error(f"Run failed: {r_res.text}")
     else:
         pending_in_view = [p for p in current_proposals if p['status'] == 'PENDING']
 
@@ -448,6 +524,7 @@ with tab_proposals:
                 {
                     'Product Code': p['product_code'],
                     'Product Name': p['product_name'],
+                    'Company': p.get('company', 'General'),
                     'Recommended Qty': p['recommended_qty'],
                     'Unit Cost (₹)': p['unit_cost'],
                     'Total Value (₹)': p['estimated_value'],
@@ -508,7 +585,7 @@ with tab_proposals:
                 risk_badge = f'<span class="badge-fefo-ok">✅ Stock Shelf-Life Healthy (FEFO Clean)</span>'
 
             with st.expander(
-                f"**{p['product_name']}** (`{p['product_code']}`) — Suggested: **{p['recommended_qty']:g} units** (₹{p['estimated_value']:,.2f}) | Status: :{st_color}[{p['status']}]",
+                f"**{p['product_name']}** (`{p['product_code']}`) | 🏢 **{p.get('company', 'General')}** — Suggested: **{p['recommended_qty']:g} units** (₹{p['estimated_value']:,.2f}) | Status: :{st_color}[{p['status']}]",
                 expanded=(p['status'] == 'PENDING' and len(page_proposals) <= 5)
             ):
                 st.markdown(risk_badge, unsafe_allow_html=True)
@@ -717,6 +794,11 @@ with tab_no_reorder:
     # Total list number
     total_no_reorder_count = len(no_reorder_items)
 
+    # Compute company list from no-reorder items
+    nr_companies = sorted(list({p.get('company') for p in no_reorder_items if p.get('company') and p.get('company') != 'None'}))
+    nr_company_counts = {c: sum(1 for p in no_reorder_items if p.get('company') == c) for c in nr_companies}
+    nr_company_options = ["All Companies"] + nr_companies
+
     # Top Metrics Bar
     if total_no_reorder_count > 0:
         total_healthy_val = sum(p.get('inventory_value', 0.0) for p in no_reorder_items)
@@ -735,15 +817,30 @@ with tab_no_reorder:
 
     st.markdown("---")
 
-    # Search Bar with dedicated Search and Reset Buttons
+    # Search Bar with Company Filter, dedicated Search and Reset Buttons
     st.markdown("##### 🔍 Search & Filter Products")
-    col_s1, col_s2, col_s3 = st.columns([3, 1, 1])
+    col_nr_comp, col_s1, col_s2, col_s3 = st.columns([2, 3, 1, 1])
+
+    with col_nr_comp:
+        selected_nr_company = st.selectbox(
+            "🏢 Filter by Company",
+            options=nr_company_options,
+            format_func=lambda c: f"{c} ({nr_company_counts.get(c, total_no_reorder_count)} rows)" if c != "All Companies" else f"All Companies ({total_no_reorder_count} rows)",
+            key="no_reorder_company_filter",
+            help="Filter surplus stock by pharmaceutical company"
+        )
+
+    # Active company filter
+    display_items = list(no_reorder_items)
+    if selected_nr_company != "All Companies":
+        display_items = [p for p in display_items if p.get('company') == selected_nr_company]
 
     with col_s1:
+        nr_search_placeholder = f"Search within {len(display_items)} rows for {selected_nr_company} (e.g. medicine name, code)..."
         search_kw = st.text_input(
             "Search product by name or item code",
             value="",
-            placeholder="Type medicine name or code (e.g. GINIPLEX, AC-BEN, MED-...)",
+            placeholder=nr_search_placeholder,
             label_visibility="collapsed",
             key="input_search_no_reorder"
         ).strip().lower()
@@ -759,24 +856,27 @@ with tab_no_reorder:
     # Active search filter
     if search_kw:
         display_items = [
-            p for p in no_reorder_items
+            p for p in display_items
             if search_kw in p.get('product_name', '').lower() or search_kw in p.get('product_code', '').lower()
         ]
-    else:
-        display_items = list(no_reorder_items)
 
     # Ensure ordered by character (alphabetical order A-Z by product_name)
     display_items.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
 
-    # Total List Number Display
-    if search_kw:
-        st.info(f"📋 **Total List Count**: Showing **{len(display_items)}** products matching `'{search_kw}'` (out of **{total_no_reorder_count}** total products with Net Need ≤ 0).")
+    # Showcase number of rows in tab as well as placeholder
+    if selected_nr_company != "All Companies" or search_kw:
+        st.info(
+            f"📋 **Showing {len(display_items)} row(s)** with Net Need ≤ 0 "
+            f"(Filtered by Company: **{selected_nr_company}**"
+            + (f" | Keyword: `'{search_kw}'`" if search_kw else "")
+            + f" | Out of **{total_no_reorder_count}** total products)."
+        )
     else:
         st.info(f"📋 **Total List Count**: Showing all **{total_no_reorder_count}** products with Net Need ≤ 0 in alphabetical order (A–Z). No reorder needed.")
 
     if not display_items:
-        if search_kw:
-            st.warning(f"No products found matching '{search_kw}'. Try a different keyword or click 'Show All Products'.")
+        if selected_nr_company != "All Companies" or search_kw:
+            st.warning(f"No products found for company '{selected_nr_company}'" + (f" matching '{search_kw}'" if search_kw else "") + " (0 rows displayed). Try a different company or click 'Show All Products'.")
         else:
             st.info("No products currently have Net Need ≤ 0. Run the procurement agent after uploading stock and sales data.")
     else:
@@ -785,6 +885,7 @@ with tab_no_reorder:
             {
                 'Product Name': p['product_name'],
                 'Product Code': p['product_code'],
+                'Company': p.get('company', 'General'),
                 'Stock on Hand': p['stock_on_hand'],
                 'Usable Stock (FEFO)': p['usable_before_expiry'],
                 'On Order': p['stock_on_order'],
@@ -835,7 +936,7 @@ with tab_no_reorder:
 
         for p in page_items_nr:
             with st.expander(
-                f"**{p['product_name']}** (`{p['product_code']}`) — Stock on Hand: **{p['stock_on_hand']:g} units** (Surplus: +{p['surplus_qty']:g} units) | Net Need: **{p['net_need']:g}**",
+                f"**{p['product_name']}** (`{p['product_code']}`) | 🏢 **{p.get('company', 'General')}** — Stock on Hand: **{p['stock_on_hand']:g} units** (Surplus: +{p['surplus_qty']:g} units) | Net Need: **{p['net_need']:g}**",
                 expanded=False
             ):
                 st.markdown(f"**Agent Rationale:** {p['rationale']}")
@@ -1006,20 +1107,23 @@ with tab_logs:
         else:
             log_file = Path("/Users/debz/.gemini/antigravity-ide/brain/3aff40a2-008c-4545-841e-136020632ad6/.system_generated/tasks/task-151.log")
 
-        if log_file.exists():
-            with log_file.open("r", encoding="utf-8", errors="replace") as f:
-                content_lines = f.readlines()
-            total_cnt = len(content_lines)
-            st.info(f"📄 Showing last **{min(num_lines, total_cnt)}** of **{total_cnt}** lines from `{log_file.name}`")
-            tail_lines = "".join(content_lines[-num_lines:])
-            st.code(tail_lines, language="log")
+        try:
+            if log_file.exists():
+                with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                    content_lines = f.readlines()
+                total_cnt = len(content_lines)
+                st.info(f"📄 Showing last **{min(num_lines, total_cnt)}** of **{total_cnt}** lines from `{log_file.name}`")
+                tail_lines = "".join(content_lines[-num_lines:])
+                st.code(tail_lines, language="log")
 
-            st.download_button(
-                label=f"📥 Download Complete {log_source} Log",
-                data="".join(content_lines),
-                file_name=f"{log_source.lower().split()[0]}_rolling.log",
-                mime="text/plain",
-                use_container_width=True
-            )
-        else:
-            st.warning(f"Log file not found at: `{log_file}`")
+                st.download_button(
+                    label=f"📥 Download Complete {log_source} Log",
+                    data="".join(content_lines),
+                    file_name=f"{log_source.lower().split()[0]}_rolling.log",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+            else:
+                st.info("Log file is not configured for this environment.")
+        except Exception as e:
+            st.info(f"Logs are currently being written to console/stdout.")

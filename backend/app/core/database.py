@@ -29,3 +29,19 @@ def init_db():
     # Import models so their metadata is registered before create_all
     import backend.app.models.entities  # noqa: F401
     Base.metadata.create_all(bind=engine)
+
+    # Automatic SQLite migration helper for newly added columns
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for table, col in [
+            ('products', 'company'),
+            ('inventory_batches', 'company'),
+            ('procurement_proposals', 'company'),
+        ]:
+            try:
+                cols = [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
+                if cols and col not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} VARCHAR(256)"))
+                    conn.commit()
+            except Exception:
+                pass

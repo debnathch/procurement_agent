@@ -19,21 +19,38 @@ def is_ignored_item_name(name: str) -> bool:
     """
     Checks if an item name contains blacklisted keywords for non-medicine or promotional materials.
 
-    Filters out packing boxes, pens, promotional pillows, and shopping/doctor bags
+    Filters out packing boxes, promotional items, bags, visual aids, hardware, freight, etc.,
     to keep procurement proposals restricted strictly to valid medicines.
-
-    Args:
-        name (str): Product description or item name string.
-
-    Returns:
-        bool: True if the item should be ignored, False otherwise.
     """
-    if not name:
+    if not name or not str(name).strip():
         return True
     s = str(name).strip().upper()
-    for kw in ('PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG '):
+    for kw in (
+        'DIARY', 'FREIGHT', 'PROJECT', 'FOIL', 'HDD', 'INSURANCE',
+        'JUTE BAG', 'PAPER-BAG', 'PLAT CHARGES', 'GIGABYTE', 'SHIRT',
+        'BOTTELE', 'CALENDER', 'CALENDAR', 'COMPUTER', 'FLASK',
+        'PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG ',
+        'PRODUCT-CARD', 'VISUAL-AID', 'DIGITAL COLOR PRINT',
+        'LBL-', 'LABEL', 'CARTON', 'BANNER', 'LITERATURE'
+    ):
         if kw in s:
             return True
+
+    if re.search(r'\bCPU\b', s):
+        return True
+
+    if re.search(r'\bTONER\b', s) or 'INK-TONER' in s or s.startswith('TONER'):
+        return True
+
+    # Promotional wearable CAP / CAPS (e.g. 'STICKER- BENGAL PHARMA- CAP', 'PROMO CAP', 'CAP 2025')
+    is_pharma_capsule = (
+        re.search(r'\b\d+\s*[*xX]\s*\d+', s) or
+        any(w in s for w in ('CAPSULE', 'CAPSU', 'SOFTGEL', 'DSR', 'IT', 'MR', 'TAB', 'TABLET', 'BOLUS', 'MG', 'MCG', 'GM', 'ML'))
+    )
+    if not is_pharma_capsule:
+        if re.search(r'\bCAPS?\b', s) or s.startswith('CAP ') or s.startswith('CAPS ') or ' CAP ' in s or ' CAPS ' in s:
+            return True
+
     return False
 
 
@@ -48,17 +65,12 @@ class ProcurementAgent:
     4. Coverage target math, safety buffer adjustments, and pack rounding (ProcurementPolicy).
     5. Financial ceilings and deterministic validation rules (ProcurementGuardrails).
     6. Generating idempotent, audit-logged ProcurementProposal records for human review.
+    7. Pharmaceutical formulation deduplication: groups identical drugs with packaging/name variations.
     """
     name = 'marg-procurement-agent'
     version = '1.1.0'
 
     def __init__(self, db: Session) -> None:
-        """
-        Initialize the procurement agent with database session and collaborating domain services.
-
-        Args:
-            db (Session): Active SQLAlchemy database session.
-        """
         self.db = db
         self.demand = DemandService(db)
         self.inventory = InventoryService(db)
@@ -70,6 +82,30 @@ class ProcurementAgent:
         )
         self.guardrails = ProcurementGuardrails()
 
+    @staticmethod
+    def _select_primary_product(variants: list[Product]) -> Product:
+        """
+        Picks the best primary representative product from a list of pharmaceutical variants.
+        Priority:
+        1. Non-archived category (not starting with ZZZZ)
+        2. Has valid unit cost > 0
+        3. Has active preferred supplier
+        4. Lower/cleaner product code length
+        """
+        def score(p: Product):
+            cat = (p.category or '').strip().upper()
+            is_archived = 1 if (cat.startswith('ZZZZ') or 'DISCONTINUED' in cat) else 0
+            has_cost = 1 if (p.unit_cost and p.unit_cost > 0) else 0
+            has_supplier = 1 if p.preferred_supplier_id else 0
+            return (
+                -is_archived,
+                has_cost,
+                has_supplier,
+                -(len(p.product_code)),
+                p.product_code
+            )
+        return max(variants, key=score)
+
     def run(
         self,
         product_codes: list[str] | None = None,
@@ -78,50 +114,53 @@ class ProcurementAgent:
         """
         Execute an end-to-end procurement cycle across all or selected active products.
 
-        Algorithm:
-        1. Query products with `reorder_enabled == True` (filtered by `product_codes` if provided).
-        2. Filter out non-medicine blacklisted items (e.g. PACKING, BAG-, PEN-).
-        3. For each candidate medicine:
-           a. Compute average daily sales velocity ($D$) via DemandService.
-           b. Aggregate stock-on-hand, on-order, expired, and near-expiry quantities via InventoryService.
-           c. Determine optimal vendor via SupplierService (preferred supplier or best multi-criteria match).
-           d. Evaluate replenishment math and FEFO actions (NORMAL, REDUCE_ORDER, PAUSE_PROCUREMENT) via ProcurementPolicy.
-           e. Apply deterministic guardrails (caps, pack multiples, MOQs, supplier validity) via ProcurementGuardrails.
-           f. Synthesize human-readable agent rationale and compute a deterministic idempotency hash.
-           g. Persist the ProcurementProposal record with PENDING status.
-        4. Log a completed ProcurementRun and audit record.
-
-        Args:
-            product_codes (list[str] | None): Optional subset of product codes to evaluate. Defaults to all.
-            lead_time_override (int | None): Optional global lead time in days to override vendor-specific times.
-
-        Returns:
-            tuple[str, list[ProcurementProposal]]: The unique run ID and list of generated proposal records.
+        Pharmaceutical Domain Deduplication:
+        Candidate medicines are grouped by their canonical pharmaceutical identity
+        (brand + dosage form + strength + volume). Pack string formatting variations
+        (e.g., '-(10X1) 10X1' vs '10X1X1 10X1X1') are consolidated into a single proposal.
         """
+        from backend.app.adapters.excel import pharma_canonical_key
+        from collections import defaultdict
+
         run_id = uuid.uuid4().hex
         stmt = select(Product).where(Product.reorder_enabled == True)
         if product_codes:
             stmt = stmt.where(Product.product_code.in_(product_codes))
-        products = self.db.scalars(stmt).all()
+        raw_products = self.db.scalars(stmt).all()
+
+        # 1. Filter out promotional items and discontinued/archived categories
+        candidate_products = []
+        for p in raw_products:
+            if is_ignored_item_name(p.product_name):
+                continue
+            cat = (p.category or '').strip().upper()
+            if cat.startswith('ZZZZ') or any(w in cat for w in ('DISCONTINUED', 'OBSOLETE', 'DORMANT', 'ARCHIVE')):
+                continue
+            candidate_products.append(p)
+
+        # 2. Group candidate products by their canonical pharmaceutical formulation identity
+        groups = defaultdict(list)
+        for p in candidate_products:
+            pkey = pharma_canonical_key(p.product_name)
+            groups[pkey].append(p)
+
         proposals = []
 
-        for product in products:
-            # Skip promotional non-medicine rows
-            if is_ignored_item_name(product.product_name):
-                continue
+        for pkey, variant_products in groups.items():
+            primary_product = self._select_primary_product(variant_products)
 
-            # 1. Forecast daily demand
-            demand, demand_source = self.demand.forecast_daily(product.product_code)
+            # 1. Forecast daily demand (DemandService checks canonical variants)
+            demand, demand_source = self.demand.forecast_daily(primary_product.product_code)
 
-            # 2. Compute current stock and FEFO expiry risk
-            inv = self.inventory.position(product.product_code, demand)
+            # 2. Compute current stock and FEFO expiry risk (InventoryService aggregates canonical variants)
+            inv = self.inventory.position(primary_product.product_code, demand)
 
             # 3. Select vendor and resolve lead time
-            supplier = self.suppliers.choose(product)
+            supplier = self.suppliers.choose(primary_product)
             lead_time = lead_time_override or (
                 supplier.lead_time_days if supplier and supplier.lead_time_days else settings.default_lead_time_days
             )
-            unit_cost = product.unit_cost or (inv['batches'][0].unit_cost if inv['batches'] else 0.0)
+            unit_cost = primary_product.unit_cost or (inv['batches'][0].unit_cost if inv['batches'] else 0.0)
 
             # 4. Calculate policy-driven order quantity
             calc = self.policy.calculate(
@@ -131,8 +170,8 @@ class ProcurementAgent:
                 stock_on_order=inv['on_order'],
                 usable_before_expiry=inv['usable_before_expiry'],
                 near_expiry_qty=inv['near_expiry'],
-                min_order_qty=product.min_order_qty,
-                pack_size=product.pack_size,
+                min_order_qty=primary_product.min_order_qty,
+                pack_size=primary_product.pack_size,
                 unit_cost=unit_cost,
                 expiry_risk=inv['expiry_risk'],
             )
@@ -144,36 +183,46 @@ class ProcurementAgent:
 
             # 5. Deterministic guardrail checks
             guard = self.guardrails.validate_proposal(
-                product, supplier, calc['order_qty'], unit_cost, is_risk_alert=is_risk_alert
+                primary_product, supplier, calc['order_qty'], unit_cost, is_risk_alert=is_risk_alert
             )
             if not guard.allowed:
                 audit(
                     self.db,
                     'PROPOSAL_BLOCKED',
                     entity_type='product',
-                    entity_id=product.product_code,
+                    entity_id=primary_product.product_code,
                     details={'reasons': guard.reasons},
                 )
                 continue
 
             # 6. Build transparency rationale and idempotency key
+            consolidation_note = ""
+            if len(variant_products) > 1:
+                other_codes = [f"[{v.product_code}] {v.product_name}" for v in variant_products if v.product_code != primary_product.product_code]
+                if other_codes:
+                    consolidation_note = f" (Consolidated variants: {', '.join(other_codes)});"
+
             rationale = (
                 f'Demand={demand:.2f}/day ({demand_source}); lead_time={lead_time}d; '
                 f'on_hand={inv["on_hand"]:.0f}; on_order={inv["on_order"]:.0f}; '
                 f'near_expiry={inv["near_expiry"]:.0f}; expired={inv["expired"]:.0f}; '
                 f'FEFO_usable={inv["usable_before_expiry"]:.0f}; target={calc["target_stock"]:.0f}; '
                 f'recommended={calc["order_qty"]:.0f}; expiry_risk={inv["expiry_risk"]:.2%}; '
-                f'action={calc["expiry_action"]}.'
+                f'action={calc["expiry_action"]}.{consolidation_note}'
             )
             idem = hashlib.sha256(
-                f'{run_id}:{product.product_code}:{supplier.supplier_id if supplier else "NONE"}:{calc["order_qty"]}'.encode()
+                f'{run_id}:{primary_product.product_code}:{supplier.supplier_id if supplier else "NONE"}:{calc["order_qty"]}'.encode()
             ).hexdigest()
 
             # 7. Create proposal entity
+            company = primary_product.company or (
+                variant_products[0].company if variant_products else None
+            ) or 'General'
             proposal = ProcurementProposal(
                 run_id=run_id,
-                product_code=product.product_code,
-                product_name=product.product_name,
+                product_code=primary_product.product_code,
+                product_name=primary_product.product_name,
+                company=company,
                 supplier_id=supplier.supplier_id if supplier else None,
                 supplier_name=supplier.supplier_name if supplier else None,
                 recommended_qty=calc['order_qty'],
@@ -200,7 +249,7 @@ class ProcurementAgent:
             ProcurementRun(
                 run_id=run_id,
                 status='COMPLETED',
-                product_count=len(products),
+                product_count=len(candidate_products),
                 proposal_count=len(proposals),
             )
         )
@@ -209,7 +258,7 @@ class ProcurementAgent:
             'PROCUREMENT_RUN_COMPLETED',
             entity_type='run',
             entity_id=run_id,
-            details={'products': len(products), 'proposals': len(proposals)},
+            details={'products': len(candidate_products), 'proposals': len(proposals)},
         )
         self.db.commit()
         return run_id, proposals
@@ -274,13 +323,29 @@ class ProcurementAgent:
         sorted_suppliers = sorted(active_suppliers, key=lambda s: (-s.reliability_score, s.lead_time_days, s.min_order_value))
         default_supplier = sorted_suppliers[0] if sorted_suppliers else None
         supplier_by_id = {s.supplier_id: s for s in active_suppliers}
-
         horizon = now + timedelta(days=settings.expiry_risk_horizon_days)
+
+        from backend.app.adapters.excel import pharma_canonical_key
+        from collections import defaultdict
+
+        candidate_products = []
+        for p in products:
+            if is_ignored_item_name(p.product_name):
+                continue
+            cat = (p.category or '').strip().upper()
+            if cat.startswith('ZZZZ') or any(w in cat for w in ('DISCONTINUED', 'OBSOLETE', 'DORMANT', 'ARCHIVE')):
+                continue
+            candidate_products.append(p)
+
+        groups = defaultdict(list)
+        for p in candidate_products:
+            pkey = pharma_canonical_key(p.product_name)
+            groups[pkey].append(p)
+
         results = []
 
-        for product in products:
-            if is_ignored_item_name(product.product_name):
-                continue
+        for pkey, variant_products in groups.items():
+            product = self._select_primary_product(variant_products)
             # 1. Demand forecast
             p_code = product.product_code
             s_info = sales_map.get(p_code)
@@ -332,6 +397,7 @@ class ProcurementAgent:
                     'product_code': product.product_code,
                     'product_name': product.product_name,
                     'category': product.category or 'General',
+                    'company': product.company or 'General',
                     'unit': product.unit or 'strip',
                     'pack_size': product.pack_size or 1.0,
                     'unit_cost': round(unit_cost, 2),

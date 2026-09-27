@@ -304,4 +304,115 @@ def test_supplier_column_extraction_and_multi_tier_headers():
     session.close()
 
 
+def test_pharma_canonical_brazol_plus_dedup():
+    from backend.app.adapters.excel import pharma_canonical_key, canonical_medicine_key
+    from backend.app.agent.procurement_agent import ProcurementAgent
+    from backend.app.models.entities import Product, InventoryBatch
+
+    # 1. Canonical key equality test
+    k1 = pharma_canonical_key('BRAZOL-PLUS TAB -(10X1) 10X1')
+    k2 = pharma_canonical_key('BRAZOL-PLUS-10X1X1 10X1X1')
+    assert k1 == k2 == 'BRAZOLPLUS_SOLID_'
+
+    # 2. Agent proposal deduplication test
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    p1 = Product(product_code="2402", product_name="BRAZOL-PLUS TAB -(10X1) 10X1", category="ZZZZZZ 520", reorder_enabled=False, unit_cost=26.0, pack_size=10.0)
+    p2 = Product(product_code="0483", product_name="BRAZOL-PLUS-10X1X1 10X1X1", category="BENGAL REMEDIES", reorder_enabled=True, unit_cost=52.41, pack_size=10.0)
+    session.add_all([p1, p2])
+    session.flush()
+
+    agent = ProcurementAgent(session)
+    run_id, proposals = agent.run()
+
+    # Must only generate 1 proposal for BRAZOL-PLUS under the active product 0483
+    brazol_proposals = [p for p in proposals if 'BRAZOL-PLUS' in p.product_name]
+    assert len(brazol_proposals) == 1
+    assert brazol_proposals[0].product_code == "0483"
+    session.close()
+
+
+def test_company_column_ingestion_and_filtering():
+    """
+    Validates:
+    1. 'Company' column in stock Excel is parsed properly.
+    2. Company is saved into products and inventory_batches (stock table).
+    3. Company is populated on ProcurementProposal and get_no_reorder_products.
+    """
+    from backend.app.agent.procurement_agent import ProcurementAgent
+    from backend.app.models.entities import Product, InventoryBatch
+
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # Create dummy Excel with 'Company' column
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df = pd.DataFrame([
+            {
+                'Item Code': 'MED-APEX1',
+                'Item Name': 'Paracetamol 500mg Tabs',
+                'Company': 'Apex Pharma',
+                'B.NO.': 'AP-01',
+                'EXP.': '11/27',
+                'CL. STOCK': 10,
+                'REORDER LEVEL': 300,
+                'PUR. RATE': 20.0,
+                'PARTY NAME': 'MedPharma Wholesale',
+            },
+            {
+                'Item Code': 'MED-CIPLA1',
+                'Item Name': 'Amoxicillin 250mg Caps',
+                'Company': 'Cipla Ltd',
+                'B.NO.': 'CIP-01',
+                'EXP.': '11/27',
+                'CL. STOCK': 500,
+                'PUR. RATE': 45.0,
+                'PARTY NAME': 'MedPharma Wholesale',
+            },
+        ])
+        df.to_excel(writer, sheet_name='Stock_Status', index=False)
+
+    service = IngestionService(session)
+    stats = service.ingest_excel(output.getvalue(), 'test_company_stock.xlsx')
+
+    assert stats['products_upserted'] == 2
+    assert stats['batches_inserted'] == 2
+
+    # Check products table
+    p_apex = session.get(Product, 'MED-APEX1')
+    p_cipla = session.get(Product, 'MED-CIPLA1')
+    assert p_apex is not None and p_apex.company == 'Apex Pharma'
+    assert p_cipla is not None and p_cipla.company == 'Cipla Ltd'
+
+    # Check stock table (inventory_batches)
+    batches = session.query(InventoryBatch).all()
+    assert len(batches) == 2
+    b_apex = next(b for b in batches if b.product_code == 'MED-APEX1')
+    b_cipla = next(b for b in batches if b.product_code == 'MED-CIPLA1')
+    assert b_apex.company == 'Apex Pharma'
+    assert b_cipla.company == 'Cipla Ltd'
+
+    # Run procurement agent
+    agent = ProcurementAgent(session)
+    run_id, proposals = agent.run()
+
+    # Proposal should have company populated
+    apex_props = [p for p in proposals if p.product_code == 'MED-APEX1']
+    assert len(apex_props) == 1
+    assert apex_props[0].company == 'Apex Pharma'
+
+    # No-reorder should have company populated
+    no_reorder = agent.get_no_reorder_products()
+    cipla_nr = [item for item in no_reorder if item['product_code'] == 'MED-CIPLA1']
+    assert len(cipla_nr) == 1
+    assert cipla_nr[0]['company'] == 'Cipla Ltd'
+
+    session.close()
+
+
+
 

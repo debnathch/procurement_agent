@@ -38,8 +38,10 @@ COLUMN_ALIASES: dict[str, list[str]] = {
         'product', 'item', 'itemtitle', 'name', 'product_name'
     ],
     'category': [
-        'category', 'company', 'mfg', 'mfgby', 'manufacturer', 'group', 'companyname',
-        'brand', 'type'
+        'category', 'group', 'brand', 'type'
+    ],
+    'company': [
+        'company', 'companyname', 'company_name', 'cmpny', 'comp', 'mfg', 'mfgby', 'manufacturer'
     ],
     'unit': ['unit', 'uom', 'packingunit'],
     'pack_size': ['packing', 'pack', 'packsize', 'pkg', 'pk', 'packaging', 'pack_size'],
@@ -49,8 +51,9 @@ COLUMN_ALIASES: dict[str, list[str]] = {
         'orderlevel', 'reorder', 'reorder_point'
     ],
     'unit_cost': [
-        'avrate', 'cost', 'net', 'purrate', 'purchaserate', 'prate', 'rate',
-        'unitcost', 'costprice', 'netrate', 'mrp', 'unit_cost'
+        'costprice', 'cost_price', 'cost', 'unitcost', 'unit_cost',
+        'purchaseprice', 'purrate', 'purchaserate', 'prate',
+        'avrate', 'net', 'netrate', 'rate', 'mrp'
     ],
     'batch_no': [
         'batchno', 'bno', 'batch', 'batchnumber', 'lot', 'lotno', 'lotnum', 'batch_no'
@@ -219,7 +222,7 @@ def canonical_medicine_key(name: str) -> str:
         # Units
         'ML', 'GM', 'MG', 'LTR', 'LT', 'KG', 'MCG', 'IU', 'M',
         # General non-distinctive / truncated fragments
-        'MR', 'MRP', 'A', 'S', 'X'
+        'MRP', 'X'
     }
 
     tokens = []
@@ -238,18 +241,85 @@ def canonical_medicine_key(name: str) -> str:
     return res if res else re.sub(r'[^A-Z0-9]', '', str(name)).upper()
 
 
-def is_footer_or_junk_row(name: str) -> bool:
+def pharma_canonical_key(name: str) -> str:
+    """
+    Computes a canonical pharmaceutical formulation key.
+
+    Distinguishes true therapeutic variants while grouping formatting/packaging noise:
+    - Same drug in same dosage form family with different pack formatting strings
+      ('-(10X1) 10X1', '10X1X1 10X1X1', '10*10', '10X1X10') produce identical keys.
+    - Preserves distinct dosage forms: 'ALFER-XT SYRUP' != 'ALFER-XT TAB'.
+    - Preserves distinct volumes for liquids: 'BEN-CYPO 100ML' != 'BEN-CYPO 200ML'.
+    - Preserves active drug combination modifiers like -MR, -S, -PLUS, -FORTE, -D.
+    """
     if not name:
+        return ''
+    s = str(name).strip().upper()
+
+    # 1. Identify dosage form category
+    form = 'SOLID'
+    if any(k in s for k in ['SYP', 'SYRUP', 'SUSP', 'SUSPEN', 'ORAL SOL', 'DROP', 'DROPS', 'RESPULE', 'SOLUTION', 'SOLN', 'LOTION']):
+        form = 'LIQUID'
+    elif any(k in s for k in ['INJ', 'INJECTION', 'INFUSION']):
+        form = 'INJECTABLE'
+    elif any(k in s for k in ['SOAP']):
+        form = 'SOAP'
+    elif any(k in s for k in ['CREAM', 'OINT', 'OINTMENT', 'GEL']):
+        form = 'TOPICAL'
+    elif any(k in s for k in ['POWDER', 'SACHET', 'GRANULES']):
+        form = 'POWDER'
+
+    # 2. Extract volume / container capacity for liquids and topicals (e.g. 200ML vs 100ML)
+    vol = ''
+    if form in ('LIQUID', 'TOPICAL', 'SOAP', 'INJECTABLE'):
+        m_vol = re.search(r'(\d+)\s*(ML|GM|MG|LTR|LT|KG)\b', s)
+        if m_vol:
+            vol = f'{m_vol.group(1)}{m_vol.group(2)}'
+
+    # 3. Base canonical medicine name
+    base = canonical_medicine_key(name)
+    return f'{base}_{form}_{vol}'
+
+
+
+def is_footer_or_junk_row(name: str) -> bool:
+    if not name or not str(name).strip():
         return True
     s = str(name).strip().upper()
     if re.search(r'^\d+\s*ITEMS?$', s) or 'ITEMS' in s:
         return True
-    if s in ('TOTAL', 'GRAND TOTAL', 'SUB TOTAL', 'SUMMARY', 'NAN', 'NONE', 'REMARKS'):
+    if s in ('TOTAL', 'GRAND TOTAL', 'SUB TOTAL', 'SUMMARY', 'NAN', 'NONE', 'REMARKS', 'NIL'):
         return True
-    # Ignore rows containing user-blacklisted keywords in item description:
-    for kw in ('PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG '):
+
+    # User-specified blacklist keywords for non-medicine promotional, hardware, freight, or office materials:
+    EXCLUDED_SUBSTRINGS = (
+        'DIARY', 'FREIGHT', 'PROJECT', 'FOIL', 'HDD', 'INSURANCE',
+        'JUTE BAG', 'PAPER-BAG', 'PLAT CHARGES', 'GIGABYTE', 'SHIRT',
+        'BOTTELE', 'CALENDER', 'CALENDAR', 'COMPUTER', 'FLASK',
+        'PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG '
+    )
+    for kw in EXCLUDED_SUBSTRINGS:
         if kw in s:
             return True
+
+    # CPU: Computer hardware (word boundary check)
+    if re.search(r'\bCPU\b', s):
+        return True
+
+    # TONER: Printer toner (word boundary check to avoid false positives like STONERIK syrup)
+    if re.search(r'\bTONER\b', s) or 'INK-TONER' in s or s.startswith('TONER'):
+        return True
+
+    # Promotional wearable CAP / CAPS (e.g. 'STICKER- BENGAL PHARMA- CAP', 'PROMO CAP', 'CAP 2025')
+    # Preserves legitimate pharmaceutical capsules with pack size (e.g. 'CAP 10X10', 'CAPS 10X10', 'SOFTGEL', 'DSR')
+    is_pharma_capsule = (
+        re.search(r'\b\d+\s*[*xX]\s*\d+', s) or
+        any(w in s for w in ('CAPSULE', 'CAPSU', 'SOFTGEL', 'DSR', 'IT', 'MR', 'TAB', 'TABLET', 'BOLUS', 'MG', 'MCG', 'GM', 'ML'))
+    )
+    if not is_pharma_capsule:
+        if re.search(r'\bCAPS?\b', s) or s.startswith('CAP ') or s.startswith('CAPS ') or ' CAP ' in s or ' CAPS ' in s:
+            return True
+
     return False
 
 
@@ -475,21 +545,43 @@ def _map_columns(df: pd.DataFrame) -> dict[str, str]:
     """
     Maps actual dataframe column names to canonical schema fields based on COLUMN_ALIASES,
     collapsing all spaces, dots, and non-alphanumerics.
+
+    Employs a two-phase resolution:
+    Phase 1: Exact alias matches for all canonical schema fields.
+    Phase 2: Substring matches only for remaining unmapped columns, ensuring specific exact
+             aliases (e.g. 'suppliername' -> 'supplier_name') are never preempted by broad
+             substring aliases (e.g. 'name' -> 'product_name').
     """
     mapping: dict[str, str] = {}
     normalized_cols = {col: _clean_alpha(col) for col in df.columns}
 
+    # Phase 1: Exact alias matches across all canonical keys
     for canonical, aliases in COLUMN_ALIASES.items():
-        for col_name, norm in normalized_cols.items():
-            if norm in aliases:
-                mapping[col_name] = canonical
-                break
-        if canonical not in mapping.values():
+        if canonical in mapping.values():
+            continue
+        for alias in aliases:
             for col_name, norm in normalized_cols.items():
-                if col_name not in mapping:
-                    if any(alias in norm for alias in aliases):
-                        mapping[col_name] = canonical
-                        break
+                if col_name not in mapping and norm == alias:
+                    mapping[col_name] = canonical
+                    break
+            if canonical in mapping.values():
+                break
+
+    # Phase 2: Substring match fallback for remaining unmapped columns
+    for canonical, aliases in COLUMN_ALIASES.items():
+        if canonical in mapping.values():
+            continue
+        for alias in aliases:
+            # Avoid overly broad substring collisions (minimum 4 characters)
+            if len(alias) < 4:
+                continue
+            for col_name, norm in normalized_cols.items():
+                if col_name not in mapping and alias in norm:
+                    mapping[col_name] = canonical
+                    break
+            if canonical in mapping.values():
+                break
+
     return mapping
 
 
@@ -761,7 +853,7 @@ class MargExcelParser:
                     'unit': 'strip/pack',
                     'pack_size': pack_size,
                     'min_order_qty': 1.0,
-                    'unit_cost': rate,
+                    'unit_cost': 0.0,  # Sales summary has selling rates, NOT procurement cost price
                     'reorder_point': 0.0,
                     'reorder_enabled': True,
                     'preferred_supplier_id': None,
@@ -966,18 +1058,27 @@ class MargExcelParser:
             if not name:
                 name = code
 
+            company = _clean_str(row.get('company')) or _clean_str(row.get('Company')) or _clean_str(row.get('COMPANY'))
             category = _clean_str(row.get('category')) or 'General'
+            if not company and category and category != 'General':
+                company = category
+            if not company:
+                company = 'General'
             unit = _clean_str(row.get('unit')) or 'strip'
             pack_size = parse_pack_size(row.get('pack_size') or name)
             min_order_qty = max(1.0, _parse_float(row.get('min_order_qty'), 1.0))
             reorder_point = _parse_float(row.get('reorder_point'), 0.0)
 
-            # Prioritize COST / NET / RATE over M.R.P.
+            # Prioritize Cost Price from stock sheet
             cost_val = (
+                _parse_float(row.get('unit_cost')) or
+                _parse_float(row.get('Cost Price')) or
+                _parse_float(row.get('COST PRICE')) or
+                _parse_float(row.get('costprice')) or
                 _parse_float(row.get('COST')) or
+                _parse_float(row.get('Purchase Price')) or
                 _parse_float(row.get('NET')) or
                 _parse_float(row.get('RATE')) or
-                _parse_float(row.get('unit_cost')) or
                 _parse_float(row.get('M.R.P.'))
             )
 
@@ -1001,17 +1102,21 @@ class MargExcelParser:
                 })
                 seen_suppliers.add(supplier_id)
 
+            cat_upper = category.upper().strip()
+            is_discontinued = cat_upper.startswith('ZZZZ') or any(w in cat_upper for w in ('DISCONTINUED', 'OBSOLETE', 'DORMANT', 'ARCHIVE'))
+
             if code not in seen_products:
                 out['products'].append({
                     'product_code': code,
                     'product_name': name,
                     'category': category,
+                    'company': company,
                     'unit': unit,
                     'pack_size': pack_size,
                     'min_order_qty': min_order_qty,
                     'unit_cost': cost_val,
                     'reorder_point': reorder_point,
-                    'reorder_enabled': True,
+                    'reorder_enabled': not is_discontinued,
                     'preferred_supplier_id': supplier_id if (supplier_id and supplier_name) else None,
                 })
                 seen_products.add(code)
@@ -1030,6 +1135,7 @@ class MargExcelParser:
             out['inventory_batches'].append({
                 'product_code': code,
                 'batch_no': batch_no,
+                'company': company,
                 'qty_on_hand': qty_on_hand,
                 'qty_on_order': qty_on_order,
                 'expiry_date': expiry_dt,

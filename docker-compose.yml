@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  procurement-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: procurement-agent:latest
+    container_name: marg_procurement_agent
+    ports:
+      - "8000:8000"   # FastAPI backend + API docs
+      - "8501:8501"   # Streamlit UI
+    environment:
+      - BACKEND_HOST=0.0.0.0
+      - BACKEND_PORT=8000
+      - FRONTEND_PORT=8501
+      - DOCKER_RUNTIME=1
+      # SQLite stored in the mounted volume so data survives restarts
+      - DATABASE_URL=sqlite:////data/procurement_agent.db
+      - EXECUTION_MODE=dry_run
+      - REQUIRE_HUMAN_APPROVAL=true
+      - DEFAULT_LEAD_TIME_DAYS=45
+      - DEFAULT_REVIEW_DAYS=7
+      - DEFAULT_SAFETY_DAYS=3
+      - EXPIRY_RISK_HORIZON_DAYS=90
+      - MAX_PROPOSAL_QTY_UNITS=5000
+      - MAX_PROPOSAL_VALUE=250000
+      - ALLOW_SUPPLIER_CHANGE=true
+    volumes:
+      # Persist SQLite database across container restarts
+      - procurement_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  procurement_data:
+    driver: local
