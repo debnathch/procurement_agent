@@ -197,47 +197,48 @@ with col_m4:
 
 st.markdown("---")
 
-# Check session state for company filters to showcase live row counts on tab labels
-active_prop_company = st.session_state.get("proposal_company_filter", "All Companies")
-active_nr_company = st.session_state.get("no_reorder_company_filter", "All Companies")
+# Tab Configuration for persistent state & URL deep-linking
+TAB_CONFIG = [
+    ("upload", "📂 Upload MARG Excel & Run"),
+    ("proposals", "💡 Review & Correct Suggestions"),
+    ("approved", "📦 Approved Orders / PO Export"),
+    ("no_reorder", "🛡️ No Need for Reorder"),
+    ("inventory", "📊 Inventory & FEFO Expiry"),
+    ("audit", "📜 Compliance Audit Log"),
+    ("logs", "📋 Live Rolling Logs"),
+]
+TAB_SLUGS = [s for s, _ in TAB_CONFIG]
+TAB_LABELS = [l for _, l in TAB_CONFIG]
+SLUG_TO_LABEL = dict(TAB_CONFIG)
+LABEL_TO_SLUG = {l: s for s, l in TAB_CONFIG}
 
-if active_prop_company and active_prop_company != "All Companies":
-    prop_tab_count = sum(1 for p in valid_proposals if p.get('company') == active_prop_company)
+# Persistent tab tracking: reads from URL query params (browser refresh) or session state
+active_slug = st.query_params.get("tab")
+if active_slug and active_slug in SLUG_TO_LABEL:
+    default_tab_label = SLUG_TO_LABEL[active_slug]
+elif "main_active_tab" in st.session_state and st.session_state["main_active_tab"] in TAB_LABELS:
+    default_tab_label = st.session_state["main_active_tab"]
 else:
-    prop_tab_count = len(valid_proposals)
+    default_tab_label = TAB_LABELS[0]
 
-# Pre-fetch no-reorder count for tab title
-no_reorder_preview = []
-if is_healthy:
-    try:
-        nr_prev_res = requests.get(
-            f"{BACKEND_URL}/procurement/no-reorder",
-            params={"lead_time_days": int(config_lead_time)},
-            timeout=3
-        )
-        if nr_prev_res.status_code == 200:
-            no_reorder_preview = [p for p in nr_prev_res.json() if not is_excluded_product(p.get('product_name', ''))]
-    except Exception:
-        pass
+def on_main_tab_changed():
+    selected = st.session_state.get("main_active_tab")
+    if selected in LABEL_TO_SLUG:
+        st.query_params["tab"] = LABEL_TO_SLUG[selected]
 
-if active_nr_company and active_nr_company != "All Companies":
-    nr_tab_count = sum(1 for p in no_reorder_preview if p.get('company') == active_nr_company)
-else:
-    nr_tab_count = len(no_reorder_preview)
+# Main Tabs with full state persistence across reruns and page refreshes
+tab_upload, tab_proposals, tab_approved, tab_no_reorder, tab_inventory, tab_audit, tab_logs = st.tabs(
+    TAB_LABELS,
+    default=default_tab_label,
+    key="main_active_tab",
+    on_change=on_main_tab_changed
+)
 
-tab_proposals_label = f"💡 Review & Correct Suggestions ({prop_tab_count})"
-tab_no_reorder_label = f"🛡️ No Need for Reorder ({nr_tab_count})"
+# Keep query parameter in sync on initial render
+current_active_label = st.session_state.get("main_active_tab", default_tab_label)
+if current_active_label in LABEL_TO_SLUG and st.query_params.get("tab") != LABEL_TO_SLUG[current_active_label]:
+    st.query_params["tab"] = LABEL_TO_SLUG[current_active_label]
 
-# Main Tabs
-tab_upload, tab_proposals, tab_approved, tab_no_reorder, tab_inventory, tab_audit, tab_logs = st.tabs([
-    "📂 Upload MARG Excel & Run",
-    tab_proposals_label,
-    "📦 Approved Orders / PO Export",
-    tab_no_reorder_label,
-    "📊 Inventory & FEFO Expiry",
-    "📜 Compliance Audit Log",
-    "📋 Live Rolling Logs"
-])
 
 # ---------------------------------------------------------------------------
 # TAB 1: Upload MARG Excel & Run Agent
@@ -371,6 +372,10 @@ with tab_upload:
                             col_s3.metric("Suppliers Updated", cumulative_stats['suppliers_upserted'])
                             col_s4.metric("Sales Rows Imported", cumulative_stats['sales_inserted'])
                             st.info("👉 Switch to the **'Review & Correct Suggestions'** tab to review, adjust, and approve order suggestions!")
+                            if st.button("👉 Go to Review & Correct Suggestions", type="primary", key="nav_to_proposals_btn"):
+                                st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+                                st.query_params["tab"] = "proposals"
+                                st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +391,8 @@ with tab_proposals:
     col_ref, col_comp, col_filt, col_risk = st.columns([1, 2, 1.5, 2])
     with col_ref:
         if st.button("🔄 Refresh Data", key="refresh_proposals_btn"):
+            st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+            st.query_params["tab"] = "proposals"
             st.rerun()
 
     # Fetch proposals from backend
@@ -461,6 +468,8 @@ with tab_proposals:
     with col_clear_search:
         if st.button("🔄 Reset Search", use_container_width=True, key="proposal_reset_search_btn"):
             search_kw = ""
+            st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+            st.query_params["tab"] = "proposals"
             st.rerun()
 
     if search_kw:
@@ -489,6 +498,8 @@ with tab_proposals:
                     r_res = requests.post(f"{BACKEND_URL}/runs", json={"lead_time_days": int(config_lead_time)}, timeout=30)
                     if r_res.status_code == 201:
                         st.success("Procurement Run finished!")
+                        st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+                        st.query_params["tab"] = "proposals"
                         st.rerun()
                     else:
                         st.error(f"Run failed: {r_res.text}")
@@ -666,6 +677,8 @@ with tab_proposals:
                                 )
                                 if decide_res.status_code == 200:
                                     st.success(f"Proposal for {p['product_name']} successfully approved!")
+                                    st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+                                    st.query_params["tab"] = "proposals"
                                     st.rerun()
                                 else:
                                     err_msg = decide_res.json().get('detail', decide_res.text)
@@ -686,6 +699,8 @@ with tab_proposals:
                                 )
                                 if decide_res.status_code == 200:
                                     st.warning(f"Proposal {p_id} rejected.")
+                                    st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+                                    st.query_params["tab"] = "proposals"
                                     st.rerun()
                                 else:
                                     st.error(f"Rejection error: {decide_res.text}")
@@ -851,6 +866,8 @@ with tab_no_reorder:
     with col_s3:
         if st.button("🔄 Show All Products", use_container_width=True, key="btn_clear_search_no_reorder"):
             search_kw = ""
+            st.session_state["main_active_tab"] = "🛡️ No Need for Reorder"
+            st.query_params["tab"] = "no_reorder"
             st.rerun()
 
     # Active search filter
