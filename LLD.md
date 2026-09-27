@@ -95,6 +95,7 @@ procurement_agent/
 │   ├── generate_demo_data.py  # Synthetic pharmaceutical dataset seeder
 │   └── build_executable.py    # Standalone binary compilation script (PyInstaller)
 ├── Dockerfile                 # Multi-stage production container build (astral-sh/uv)
+├── docker-compose.yml         # Container stack with persistent SQLite storage volume
 ├── .dockerignore              # Docker build exclusions
 ├── launcher.py                # Unified process orchestrator (FastAPI + Streamlit + health polling)
 ├── run_mac.command            # One-click desktop launcher for macOS (double-clickable)
@@ -124,6 +125,7 @@ erDiagram
         string product_code PK
         string product_name
         string category
+        string company
         string unit
         float pack_size
         float min_order_qty
@@ -152,6 +154,7 @@ erDiagram
         int id PK
         string product_code FK
         string batch_no
+        string company
         float qty_on_hand
         float qty_on_order
         datetime expiry_date
@@ -185,6 +188,7 @@ erDiagram
         string run_id FK
         string product_code FK
         string product_name
+        string company
         string supplier_id FK
         string supplier_name
         float recommended_qty
@@ -444,6 +448,50 @@ sequenceDiagram
     UI-->>User: Shows confirmed status & enables CSV/PO export
 ```
 
+#### 5.3 Company Attribution & Multi-Tab Filter Workflow
+
+Pharmaceutical distributors organize catalogs and replenishment cycles primarily by manufacturing company (e.g. *Apex Pharma*, *Cipla Ltd*, *Sun Pharma*, *Dr Reddys*). The company dimension is ingested and propagated through all tiers:
+
+```mermaid
+flowchart TD
+    RAW["MARG Excel Closing Stock ('Company' Column)"] --> PARSE["MargExcelParser (_extract_stock_and_products)"]
+    PARSE --> PROD["Product Master (Product.company)"]
+    PARSE --> STK["Stock Table (InventoryBatch.company)"]
+    PROD --> AGENT["ProcurementAgent.run() & get_no_reorder_products()"]
+    AGENT --> PROP["ProcurementProposal (company)"]
+    AGENT --> SURPLUS["Surplus Products (company)"]
+    PROP --> API1["/proposals?company=..."]
+    SURPLUS --> API2["/procurement/no-reorder?company=..."]
+    API1 --> TAB2["Tab 2: Review & Correct Suggestions"]
+    API2 --> TAB4["Tab 4: No Need for Reorder"]
+    TAB2 --> SHOWCASE2["Company Dropdown + Dynamic Placeholder + Live Row Count Showcase"]
+    TAB4 --> SHOWCASE4["Company Dropdown + Dynamic Placeholder + Live Row Count Showcase"]
+```
+
+1. **Ingestion & Auto-Migration**:
+   - `MargExcelParser` normalizes column variations (`Company`, `COMPANY`, `C O M P A N Y`, `Company Name`) to canonical `company`.
+   - `init_db()` in `backend/app/core/database.py` executes an automatic SQLite `PRAGMA table_info` migration, adding `company VARCHAR(256)` to existing `products`, `inventory_batches`, and `procurement_proposals` tables without requiring manual schema drops.
+2. **Multi-Tab Filtering & Row Count Showcases**:
+   - **Tab 2 (Review & Correct Suggestions)** and **Tab 4 (No Need for Reorder)** provide an interactive **🏢 Filter by Company** selectbox.
+   - Each dropdown entry displays row counts per manufacturer (e.g. `Cipla Ltd (8 rows)`).
+   - Dynamic search input placeholders display current row count and company scope: `Search within {N} rows for {Company}...`.
+   - Live information callouts highlight exact row counts displayed in the tab: `Showing {N} row(s) (Filtered by Company: {Company})`.
+   - Warning empty-state placeholders display when no items match: `No rows found for company '{Company}' (0 rows displayed)`.
+   - Dataframe summary tables and item cards feature dedicated Company columns and badges (`🏢 Company`).
+
+#### 5.4 Stateful Tab Persistence & URL Deep-Linking
+
+To eliminate tab-resetting (where any button action or browser refresh defaulted the UI back to Tab 1), the presentation layer implements bidirectional state persistence:
+
+1. **Stateful `st.tabs`**:
+   - `st.tabs` is configured with `default=default_tab_label`, `key="main_active_tab"`, and `on_change=on_main_tab_changed`.
+   - Replaced dynamic tab label strings with clean, immutable tab identifiers, preventing Streamlit from destroying and recreating tab widgets on data updates.
+2. **Bidirectional URL Query Parameter Sync (`st.query_params`)**:
+   - Mapped URL slugs (`upload`, `proposals`, `approved`, `no_reorder`, `inventory`, `audit`, `logs`) to tab containers.
+   - When a user refreshes the browser (`F5` or `Cmd+R`), the browser URL query parameter `?tab=<slug>` is read first to reconstruct the active tab.
+   - User actions triggering `st.rerun()` (such as *Refresh Data*, *Approve with Corrections*, *Reject*, *Reset Search*, *Show All Products*, and pagination) maintain the active tab without state loss.
+   - Direct tab-switching buttons (e.g. *👉 Go to Review & Correct Suggestions*) update `st.session_state["main_active_tab"]` and `st.query_params["tab"]` before dispatching `st.rerun()`.
+
 ---
 
 ### 6. Interface & REST API Contracts
@@ -454,14 +502,14 @@ sequenceDiagram
 | `GET` | `/products` | List all canonical products | None | `list[ProductDict]` |
 | `GET` | `/products/{code}` | Get single product by code | None | `ProductDict` |
 | `GET` | `/suppliers` | List all active vendors | None | `list[SupplierDict]` |
-| `GET` | `/inventory` | List all current batch positions & expiries | None | `list[InventoryBatchDict]` |
+| `GET` | `/inventory` | List all current batch positions, company & expiries | None | `list[InventoryBatchDict]` |
 | `POST` | `/runs` | Trigger procurement agent execution | `{"product_codes": [], "lead_time_days": 45}` | `{"run_id": "...", "proposals": N}` |
 | `GET` | `/runs` | List historical agent execution runs | None | `list[RunDict]` |
-| `GET` | `/proposals` | Query generated proposals | `?status_filter=PENDING` | `list[ProposalDict]` |
+| `GET` | `/proposals` | Query generated proposals (status & company filtered) | `?status_filter=PENDING&company=Cipla+Ltd` | `list[ProposalDict]` |
 | `GET` | `/proposals/{id}` | Get single proposal details | None | `ProposalDict` |
 | `POST` | `/proposals/{id}/decide` | Approve/modify/reject a proposal | `{"action": "approve", "approved_qty": 100, ...}` | `{"status": "EXECUTED", "reference": "..."}` |
 | `POST` | `/proposals/batch-decide` | Batch approve or reject proposals | `{"action": "approve", "proposal_ids": [...]}` | `{"status": "success", "processed": N}` |
-| `GET` | `/procurement/no-reorder` | Products with Net Need <= 0 (fast pre-fetch) | `?lead_time_days=45&search=...` | `list[NoReorderProductDict]` |
+| `GET` | `/procurement/no-reorder` | Products with Net Need <= 0 (fast pre-fetch, company filtered) | `?lead_time_days=45&search=...&company=...` | `list[NoReorderProductDict]` |
 | `POST` | `/ingestion/upload-marg-excel` | Multipart file upload for MARG Excel | `file: bytes, run_agent: bool, lead_time_days: int` | `{"stats": {...}, "proposals": [...]}` |
 | `GET` | `/ingestion/sample-template` | Download verified sample MARG Excel workbook | None | `application/vnd.openxmlformats` binary |
 | `POST` | `/system/reset-db` | Purge database records for fresh ingestion | None | `{"status": "success", "purged": {...}}` |
@@ -579,3 +627,12 @@ To ensure non-technical warehouse supervisors and retail pharmacy operators can 
    - Checks for `uv` or Python launcher (`py -3` / `python`).
    - Performs automated environment setup and dependency verification.
    - Spawns the dual-process supervisor with automatic browser opening.
+
+#### 9.6 Multi-Container Orchestration (`docker-compose.yml`)
+
+For teams standardizing on Docker deployments, `docker-compose.yml` provides a production-ready container stack:
+* **Single Command Launch**: `docker compose up --build`.
+* **Persistent Storage Volume**: Mounts named volume `procurement_data` to `/data`, storing `procurement_agent.db` safely across container rebuilds and restarts.
+* **Dual Port Mapping**: Exposes FastAPI on `:8000` (API & Swagger docs) and Streamlit on `:8501`.
+* **Container Healthcheck**: Automatic HTTP healthcheck querying `/health` at 30-second intervals with 15-second startup grace period.
+* **Configurable Defaults**: Environment variables pre-configured for dry-run safety (`EXECUTION_MODE=dry_run`, `REQUIRE_HUMAN_APPROVAL=true`, `DEFAULT_LEAD_TIME_DAYS=45`).

@@ -3,14 +3,16 @@
 Local-first, human-approved procurement agent for pharmaceutical distribution with MARG ERP as the system of record.
 
 ## Features
-- MARG Excel ingestion (Closing Stock, Sales Summary, Supplier Master)
+- MARG Excel ingestion (Closing Stock, Sales Summary, Supplier Master) with automatic Company attribution
 - FEFO / expiry-aware inventory classification (90-day horizon)
 - Deterministic demand forecasting from sales history
 - Procurement policy: target-stock → net-need → pack-rounding → guardrails
 - Human-in-the-loop review: Approve / Modify / Reject every suggestion
+- Multi-tab Company filtering across reorder proposals and surplus stock with real-time row count showcases
+- Stateful tab persistence via URL query parameters (`st.query_params`) ensuring browser reloads keep your active tab
 - Dry-run safe by default — no PO is raised without human approval
 - FastAPI backend (port 8000) + Streamlit UI (port 8501)
-- SQLite local database (zero setup)
+- SQLite local database with automatic schema migration (zero setup)
 
 ---
 
@@ -274,11 +276,42 @@ docker run -p 8000:8000 -p 8501:8501 \
 ```
 MARG ERP Excel
     → Upload in UI (Tab 1)
-    → Ingestion: Products + Inventory Batches + Sales History + Suppliers
+    → Ingestion & Auto-Migration: Products + Inventory Batches (with Company) + Sales + Suppliers
     → Procurement Agent: Demand → Target Stock → Net Need → Pack Round → Guardrails
-    → Proposals (Tab 2): Human reviews, corrects qty/supplier, approves or rejects
-    → Approved Orders (Tab 3): Export CSV for supplier / MARG import
+    → Proposals (Tab 2): Company-filtered review, edit qty/supplier, approve or reject (Live row counts)
+    → Approved Orders (Tab 3): Export PO CSV for supplier / MARG import
+    → No Need for Reorder (Tab 4): Company-filtered surplus/healthy stock visibility (Live row counts)
 ```
+
+---
+
+## 🖥️ UI Structure & Interactive Workflows
+
+The Streamlit UI is organized into 4 stateful tabs with URL deep-linking (`st.query_params`), ensuring the user's active tab is preserved across browser refreshes and action re-renders:
+
+1. **Tab 1: 📁 Upload MARG Excel and Run**
+   - Upload closing stock, sales summary, and supplier master files.
+   - Automatically parses company attribution, detects date formats (`DD-MM-YYYY` / `MM/DD/YYYY`), and updates database schemas.
+   - Triggers the procurement calculation pipeline with configurable lead time, buffer days, and execution modes.
+
+2. **Tab 2: 📋 Review and Correct Suggestions**
+   - Displays all generated replenishment proposals with net need > 0.
+   - **Company Filter Dropdown**: Filter proposals by pharmaceutical manufacturing company or view `All Companies`.
+   - **Live Row Count Metrics**: Shows `Showing X of Y proposals` dynamically in metrics cards, tab headers, and table placeholders.
+   - In-place editing of proposed quantities, supplier selection, and bulk/single Approve/Reject controls.
+
+3. **Tab 3: ✅ Approved Orders**
+   - Central repository of all human-approved proposals.
+   - One-click CSV export ready for email dispatch or MARG ERP purchase order import.
+
+4. **Tab 4: 📦 No Need for Reorder**
+   - Real-time catalog of products with zero or negative net need (sufficient stock on hand or high expiry pause).
+   - **Company Filter Dropdown**: Filter surplus stock items by manufacturer with live row count badges (`Showing X of Y items`).
+   - Detailed visibility into available usable stock, target stock, daily demand velocity, and surplus quantities.
+
+5. **Stateful Navigation & URL Deep-Linking**
+   - Active tab state is synchronized with `st.query_params["tab"]`.
+   - Refreshing the browser or clicking action buttons (Approve/Reject) maintains the exact tab and company filter currently being inspected instead of resetting to the upload tab.
 
 ## Do Not Commit
 `.env`, credentials, `.venv/`, `*.db`, real MARG export files

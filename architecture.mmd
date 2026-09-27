@@ -4,31 +4,40 @@ flowchart TD
     MARG_API["MARG REST API (MargApiSourceAdapter)"] --> NORM["Canonical Normalization"]
     EXCEL --> HDR["Multi-Tier Header Resolution (Subheader Merging)"]
     HDR --> SAN["Supplier Name Sanitizer (Date-Prefix Stripping)"]
+    HDR --> COMP["Company Column Ingestion & Auto-Migration"]
     SAN --> NORM
+    COMP --> NORM
     NORM --> V["Validation, Foreign Key & Quality Checks"]
     V --> DB[("SQLite Canonical Database Store")]
+    V --> STK[("Stock Table: inventory_batches (Company & FEFO)")]
+    V --> PROD[("Products Table (Company & Master Spec)")]
     V --> SUPS[("Suppliers Table (Universal Upsert)")]
   end
 
   subgraph Engine_Layer ["Procurement Intelligence Engine"]
     DB --> DS["Demand Forecasting (90-day Velocity & Heuristics)"]
-    DB --> IV["Inventory & Batch Position (FEFO Shelf-Life Risk)"]
+    STK --> IV["Inventory & Batch Position (FEFO Shelf-Life Risk)"]
+    PROD --> DEDUP["Pharma Canonical Grouping & Deduplication"]
     SUPS --> SS["Supplier Selection (Preferred & Multi-Criteria Ranking)"]
     DS --> AG["Procurement Domain Agent (ProcurementAgent)"]
     IV --> AG
+    DEDUP --> AG
     SS --> AG
     AG --> POL["Procurement Policy (Coverage Target & Pack Rounding)"]
     POL --> G["Deterministic Guardrails & Value Ceilings"]
   end
 
   subgraph Presentation_Execution ["Presentation & PO Execution Layer"]
-    G --> PROPO[("Proposals Store")]
+    G --> PROPO[("Proposals Store (Company Propagated)")]
     PROPO --> FASTAPI["FastAPI REST Backend (:8000)"]
-    FASTAPI --> NOREORDER["No Need for Reorder API (/procurement/no-reorder)"]
-    PROPO --> UI["Streamlit Web UI (:8501)"]
+    FASTAPI --> NOREORDER["No Need for Reorder API (/procurement/no-reorder?company=...)"]
+    FASTAPI --> PROPO_API["Proposals API (/proposals?company=...&status=...)"]
+    PROPO_API --> UI["Streamlit Web UI (:8501)"]
     NOREORDER --> UI
     SUPS --> UI
-    UI --> HUMAN["Human Review & Correction (Qty, Notes, Supplier Selectbox)"]
+    UI --> TABS["Stateful Tab Navigator & URL Deep-Linking (st.query_params)"]
+    TABS --> FILT["Multi-Tab Company Filters & Live Row Count Showcases"]
+    FILT --> HUMAN["Human Review & Correction (Qty, Notes, Supplier Selectbox)"]
     HUMAN --> EXEC["PO Execution Factory (build_executor)"]
     EXEC -->|dry_run| DRY["Dry-Run Simulator"]
     EXEC -->|csv| CSV["CSV PO Export (outbox/)"]
@@ -41,6 +50,8 @@ flowchart TD
     LAUNCHER["Unified Launcher (launcher.py)"] --> FASTAPI
     LAUNCHER --> UI
     SCRIPTS["One-Click Double-Click Launchers (run_mac.command / run_windows.bat)"] --> LAUNCHER
+    DCOMP["Docker Compose (docker-compose.yml)"] --> FASTAPI
+    DCOMP --> UI
     PYINST["PyInstaller Compiler (scripts/build_executable.py)"] --> BIN["Standalone Executables (dist/procurement-agent)"]
     DOCKER["Multi-Stage Dockerfile (astral-sh/uv)"] --> CONT["Docker Container Image"]
     GHA["GitHub Actions CI/CD (.github/workflows/ci-cd.yml)"] --> LINT["Quality & Lint (ruff)"]
