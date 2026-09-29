@@ -12,6 +12,8 @@ from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
 from pathlib import Path
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 from backend.app.core.config import settings
 from backend.app.core.database import get_db, init_db
@@ -97,7 +99,7 @@ def get_product(product_code: str, db: Session = Depends(get_db)):
     Raises:
         HTTPException: 404 if the product is not found.
     """
-    p = db.get(Product, product_code)
+    p = db.scalars(select(Product).where(Product.product_code == product_code)).first()
     if not p:
         raise HTTPException(status_code=404, detail='Product not found.')
     return _product_dict(p)
@@ -117,6 +119,9 @@ def _product_dict(p: Product) -> dict:
         'product_code': p.product_code,
         'product_name': p.product_name,
         'category': p.category,
+        'company': p.company or 'General',
+        'manufacturer': p.manufacturer or 'General',
+        'is_promo_material': bool(getattr(p, 'is_promo_material', False)),
         'unit': p.unit,
         'pack_size': p.pack_size,
         'min_order_qty': p.min_order_qty,
@@ -202,16 +207,19 @@ def list_no_reorder_products(
     lead_time_days: Optional[int] = None,
     search: Optional[str] = None,
     company: Optional[str] = None,
+    manufacturer: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
     Returns active products with Net Need <= 0, ordered alphabetically by character.
-    Supports optional search filtering.
+    Supports optional search, company, and manufacturer filtering.
     """
     agent = ProcurementAgent(db)
     items = agent.get_no_reorder_products(lead_time_override=lead_time_days)
     if company and company.lower() != 'all companies':
         items = [i for i in items if (i.get('company') or '').lower() == company.lower()]
+    if manufacturer and manufacturer.lower() != 'all manufacturers':
+        items = [i for i in items if (i.get('manufacturer') or '').lower() == manufacturer.lower()]
     if search:
         s_low = search.strip().lower()
         items = [
@@ -225,14 +233,16 @@ def list_no_reorder_products(
 def list_proposals(
     status_filter: Optional[str] = None,
     company: Optional[str] = None,
+    manufacturer: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
-    Retrieve procurement proposals optionally filtered by lifecycle status.
+    Retrieve procurement proposals optionally filtered by lifecycle status, company, and manufacturer.
 
     Args:
         status_filter (Optional[str]): Optional filter (e.g. 'PENDING', 'APPROVED', 'REJECTED').
         company (Optional[str]): Optional company filter.
+        manufacturer (Optional[str]): Optional manufacturer filter.
         db (Session): Database session.
 
     Returns:
@@ -243,6 +253,8 @@ def list_proposals(
         stmt = stmt.where(ProcurementProposal.status == status_filter.upper())
     if company and company.lower() != 'all companies':
         stmt = stmt.where(ProcurementProposal.company == company)
+    if manufacturer and manufacturer.lower() != 'all manufacturers':
+        stmt = stmt.where(ProcurementProposal.manufacturer == manufacturer)
     proposals = db.scalars(stmt).all()
     return [_proposal_dict(p) for p in proposals]
 
@@ -284,6 +296,8 @@ def _proposal_dict(p: ProcurementProposal) -> dict:
         'product_code': p.product_code,
         'product_name': p.product_name,
         'company': p.company or 'General',
+        'manufacturer': p.manufacturer or 'General',
+        'batch_numbers': p.batch_numbers or 'DEFAULT',
         'supplier_id': p.supplier_id,
         'supplier_name': p.supplier_name,
         'recommended_qty': p.recommended_qty,
@@ -409,37 +423,161 @@ def list_audit(limit: int = 100, db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Inventory Batches
+# Inventory Positions (Aggregated Product View)
 # ---------------------------------------------------------------------------
 @app.get('/inventory', tags=['inventory'])
-def list_inventory(db: Session = Depends(get_db)):
+def list_inventory(
+    company: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    include_promo: bool = False,
+    include_zero_stock: bool = False,
+    exclude_healthy: bool = False,
+    db: Session = Depends(get_db)
+):
     """
-    Fetch all inventory batch records joined with product metadata.
+    Fetch inventory grouped by Product Name and Expiry Sub-Category (FEFO Shelf-Life Status).
+    - Excludes batches with Zero stock (qty_on_hand <= 0).
+    - Groups all batches having the same product name and same expiry sub-category together.
+    - The batch_no column contains ONLY the batches that belong to that specific category.
+    - If exclude_healthy=True, filters out '✅ Shelf-Life Healthy' items.
+    """
+    now_dt = datetime.utcnow()
+    horizon_days = int(settings.expiry_risk_horizon_days if settings else 180)
+    horizon_dt = now_dt + timedelta(days=horizon_days)
 
-    Returns:
-        list[dict]: List of batch positions including batch number, quantities, and expiry dates.
+    def get_fefo_category(exp_dt):
+        if not exp_dt:
+            return 'Unknown / General'
+        if exp_dt <= now_dt:
+            return '⛔ Expired'
+        elif exp_dt <= horizon_dt:
+            return f'⚠️ Near-Expiry (≤ {horizon_days}d)'
+        else:
+            return '✅ Shelf-Life Healthy'
+
+    p_stmt = select(Product)
+    if not include_promo:
+        p_stmt = p_stmt.where(Product.is_promo_material == False)
+    if company and company.lower() != 'all companies':
+        p_stmt = p_stmt.where(Product.company == company)
+    if manufacturer and manufacturer.lower() != 'all manufacturers':
+        p_stmt = p_stmt.where(Product.manufacturer == manufacturer)
+    products = db.scalars(p_stmt).all()
+
+    # Product map by code
+    prod_map = {}
+    for p in products:
+        if p.product_code not in prod_map:
+            prod_map[p.product_code] = p
+
+    all_batches = db.scalars(select(InventoryBatch)).all()
+
+    # Filter batches: exclude zero-stock batches unless explicitly requested
+    if not include_zero_stock:
+        target_batches = [b for b in all_batches if b.qty_on_hand > 0 and b.product_code in prod_map]
+    else:
+        target_batches = [b for b in all_batches if b.product_code in prod_map]
+
+    # Group by (product_name, fefo_category)
+    groups = defaultdict(list)
+    for b in target_batches:
+        p = prod_map.get(b.product_code)
+        pname = p.product_name if p else b.product_code
+        cat = get_fefo_category(b.expiry_date)
+        if exclude_healthy and cat.startswith('✅'):
+            continue
+        groups[(pname, cat)].append((p, b))
+
+    results = []
+    for (pname, cat), items in sorted(groups.items(), key=lambda x: str(x[0][0]).strip().upper()):
+        p0, b0 = items[0]
+        total_on_hand = sum(b.qty_on_hand for _, b in items)
+        total_on_order = sum(b.qty_on_order for _, b in items)
+
+        batch_nos = [b.batch_no for _, b in items if b.batch_no and b.batch_no != 'DEFAULT']
+        batch_str = ", ".join(dict.fromkeys(batch_nos)) if batch_nos else 'DEFAULT'
+
+        exp_dates = [b.expiry_date for _, b in items if b.expiry_date]
+        min_exp = min(exp_dates) if exp_dates else None
+
+        costs = [b.unit_cost for _, b in items if b.unit_cost and b.unit_cost > 0]
+        unit_cost = costs[-1] if costs else ((p0.unit_cost if p0 else 0.0) or 0.0)
+        total_val = sum((b.qty_on_hand * (b.unit_cost or unit_cost)) for _, b in items)
+
+        comp = b0.company or (p0.company if p0 else 'General')
+        mfr = b0.manufacturer or (p0.manufacturer if p0 else 'General')
+
+        results.append({
+            'product_code': p0.product_code if p0 else b0.product_code,
+            'product_name': pname,
+            'category': cat,
+            'company': comp or 'General',
+            'manufacturer': mfr or 'General',
+            'batch_no': batch_str,
+            'qty_on_hand': total_on_hand,
+            'qty_on_order': total_on_order,
+            'expiry_date': min_exp.strftime('%Y-%m-%d') if min_exp else None,
+            'fefo_status': cat,
+            'unit_cost': unit_cost,
+            'inventory_value': round(total_val, 2),
+        })
+
+    return results
+
+
+@app.get('/promo-material', tags=['inventory'])
+def list_promo_material(
+    company: Optional[str] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """
-    query = (
-        select(InventoryBatch, Product.product_name, Product.category, Product.company)
-        .outerjoin(Product, InventoryBatch.product_code == Product.product_code)
-        .order_by(Product.product_name, InventoryBatch.batch_no)
-    )
-    rows = db.execute(query).all()
-    return [
-        {
-            'id': b.id,
-            'product_code': b.product_code,
-            'product_name': product_name or b.product_code,
-            'category': category or 'General',
-            'company': b.company or prod_company or 'General',
-            'batch_no': b.batch_no,
-            'qty_on_hand': b.qty_on_hand,
-            'qty_on_order': b.qty_on_order,
-            'expiry_date': b.expiry_date.strftime('%Y-%m-%d') if b.expiry_date else None,
-            'unit_cost': b.unit_cost,
+    Fetch promo material items (products where manufacturer and supplier were blank in stock Excel).
+    Aggregated at the Product level: 1 row per product, sum of stock, comma-separated batches.
+    """
+    p_stmt = select(Product).where(Product.is_promo_material == True)
+    if company and company.lower() != 'all companies':
+        p_stmt = p_stmt.where(Product.company == company)
+    p_stmt = p_stmt.order_by(Product.product_name.asc())
+    products = db.scalars(p_stmt).all()
+
+    all_batches = db.scalars(select(InventoryBatch)).all()
+    batch_map = defaultdict(list)
+    for b in all_batches:
+        batch_map[b.product_code].append(b)
+
+    results = []
+    for p in products:
+        p_batches = batch_map.get(p.product_code, [])
+        total_on_hand = sum(b.qty_on_hand for b in p_batches)
+        batch_nos = [b.batch_no for b in p_batches if b.batch_no and b.batch_no != 'DEFAULT']
+        batch_str = ", ".join(dict.fromkeys(batch_nos)) if batch_nos else (p_batches[0].batch_no if p_batches else 'DEFAULT')
+
+        exp_dates = [b.expiry_date for b in p_batches if b.expiry_date]
+        min_exp = min(exp_dates) if exp_dates else None
+        unit_cost = p.unit_cost or (p_batches[0].unit_cost if p_batches else 0.0)
+
+        item = {
+            'product_code': p.product_code,
+            'product_name': p.product_name,
+            'category': 'Promo Material',
+            'company': p.company or 'General',
+            'manufacturer': p.manufacturer or 'None (Promo)',
+            'supplier_name': p.supplier_name or 'None (Promo)',
+            'batch_no': batch_str,
+            'qty_on_hand': total_on_hand,
+            'unit_cost': unit_cost,
+            'total_value': round(total_on_hand * unit_cost, 2),
+            'expiry_date': min_exp.strftime('%Y-%m-%d') if min_exp else 'N/A',
+            'unit': p.unit or 'pcs',
         }
-        for b, product_name, category, prod_company in rows
-    ]
+        if search:
+            s_low = search.strip().lower()
+            if s_low not in item['product_name'].lower() and s_low not in item['product_code'].lower():
+                continue
+        results.append(item)
+
+    return results
 
 
 # ---------------------------------------------------------------------------

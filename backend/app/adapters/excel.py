@@ -41,7 +41,11 @@ COLUMN_ALIASES: dict[str, list[str]] = {
         'category', 'group', 'brand', 'type'
     ],
     'company': [
-        'company', 'companyname', 'company_name', 'cmpny', 'comp', 'mfg', 'mfgby', 'manufacturer'
+        'company', 'companyname', 'company_name', 'cmpny', 'comp'
+    ],
+    'manufacturer': [
+        'manufacturer', 'manufacturers', 'mfr', 'mfg', 'mfgby', 'manufacturedby',
+        'mfrname', 'manufacturername', 'mfg_by'
     ],
     'unit': ['unit', 'uom', 'packingunit'],
     'pack_size': ['packing', 'pack', 'packsize', 'pkg', 'pk', 'packaging', 'pack_size'],
@@ -59,19 +63,19 @@ COLUMN_ALIASES: dict[str, list[str]] = {
         'batchno', 'bno', 'batch', 'batchnumber', 'lot', 'lotno', 'lotnum', 'batch_no'
     ],
     'expiry_date': [
-        'expdate', 'expirydate', 'expiry', 'exp', 'expdt', 'exp_date', 'expiry_date',
+        'exp', 'expdate', 'expirydate', 'expiry', 'expdt', 'exp_date', 'expiry_date',
         'validity', 'validupto', 'valdate', 'bbd', 'bestbefore'
     ],
     'qty_on_hand': [
-        'clstock', 'closingstock', 'stock', 'balance', 'balqty', 'qty', 'onhand',
-        'qtyonhand', 'currstock', 'currentstock', 'qty_on_hand'
+        'currentstock', 'currstock', 'current_stock', 'clstock', 'closingstock', 'stock',
+        'balance', 'balqty', 'qty', 'onhand', 'qtyonhand', 'qty_on_hand'
     ],
     'qty_on_order': ['qtyonorder', 'onorder', 'pendingpo', 'poqty', 'qty_on_order'],
     'supplier_id': ['supplierid', 'suppliercode', 'partycode', 'vendorid', 'supcode', 'supplier_id'],
     'supplier_name': [
         'suppliername', 'suppliernames', 'nameofsupplier', 'nameofsuppliers',
         'suppliers', 'supplier', 'partyname', 'party', 'vendorname', 'vendor',
-        'vendors', 'mfr', 'manufacturer', 'manufacturers', 'mfrname', 'supplier_name'
+        'vendors', 'supplier_name'
     ],
     'lead_time_days': ['leadtimedays', 'leadtime', 'crdays', 'creditdays', 'lead_time_days'],
     'min_order_value': ['minordervalue', 'mov', 'minorder', 'min_order_value'],
@@ -283,6 +287,12 @@ def pharma_canonical_key(name: str) -> str:
 
 
 def is_footer_or_junk_row(name: str) -> bool:
+    """
+    Identifies pure footer/header/junk rows (totals, item count banners, empty names).
+    Also filters MARG ERP ledger/service charge entries that are not physical products
+    (e.g. INVENTORY CHARGES, CYLINDER CHARGE, FREIGHT CHARGES, etc.).
+    These entries have billing amounts stored as qty — they must never enter the product catalog.
+    """
     if not name or not str(name).strip():
         return True
     s = str(name).strip().upper()
@@ -291,34 +301,42 @@ def is_footer_or_junk_row(name: str) -> bool:
     if s in ('TOTAL', 'GRAND TOTAL', 'SUB TOTAL', 'SUMMARY', 'NAN', 'NONE', 'REMARKS', 'NIL'):
         return True
 
-    # User-specified blacklist keywords for non-medicine promotional, hardware, freight, or office materials:
-    EXCLUDED_SUBSTRINGS = (
-        'DIARY', 'FREIGHT', 'PROJECT', 'FOIL', 'HDD', 'INSURANCE',
-        'JUTE BAG', 'PAPER-BAG', 'PLAT CHARGES', 'GIGABYTE', 'SHIRT',
-        'BOTTELE', 'CALENDER', 'CALENDAR', 'COMPUTER', 'FLASK',
-        'PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG '
+    # MARG ERP ledger / service charge entries — NOT physical stock items
+    # These appear in closing stock reports as billing entries with rupee amounts as qty
+    MARG_SERVICE_CHARGE_KEYWORDS = (
+        'INVENTORY CHARGE',
+        'CYLINDER CHARGE',
+        'FREIGHT CHARGE',
+        'FREIGHT CHARGES',
+        'CARTAGE',
+        'LOADING CHARGE',
+        'UNLOADING CHARGE',
+        'LABOUR CHARGE',
+        'SERVICE CHARGE',
+        'SERVICE TAX',
+        'INTEREST CHARGE',
+        'INTEREST ON',
+        'LATE PAYMENT',
+        'BANK CHARGE',
+        'MISC CHARGE',
+        'MISCELLANEOUS CHARGE',
+        'ROUND OFF',
+        'ROUNDING OFF',
+        'CASH DISCOUNT',
+        'TRADE DISCOUNT',
+        'SCHEME DISCOUNT',
+        'CLAIM AMOUNT',
+        'DAMAGE CLAIM',
+        'DEBIT NOTE',
+        'CREDIT NOTE',
+        'C.S.T.', 'GST CHARGE', 'SGST', 'CGST', 'IGST', 'TCS', 'TDS',
+        'OCTROI', 'ENTRY TAX',
+        'SAMPLE CHARGE',
+        'DEMO CHARGE',
+        'HANDLING CHARGE',
     )
-    for kw in EXCLUDED_SUBSTRINGS:
-        if kw in s:
-            return True
-
-    # CPU: Computer hardware (word boundary check)
-    if re.search(r'\bCPU\b', s):
+    if any(kw in s for kw in MARG_SERVICE_CHARGE_KEYWORDS):
         return True
-
-    # TONER: Printer toner (word boundary check to avoid false positives like STONERIK syrup)
-    if re.search(r'\bTONER\b', s) or 'INK-TONER' in s or s.startswith('TONER'):
-        return True
-
-    # Promotional wearable CAP / CAPS (e.g. 'STICKER- BENGAL PHARMA- CAP', 'PROMO CAP', 'CAP 2025')
-    # Preserves legitimate pharmaceutical capsules with pack size (e.g. 'CAP 10X10', 'CAPS 10X10', 'SOFTGEL', 'DSR')
-    is_pharma_capsule = (
-        re.search(r'\b\d+\s*[*xX]\s*\d+', s) or
-        any(w in s for w in ('CAPSULE', 'CAPSU', 'SOFTGEL', 'DSR', 'IT', 'MR', 'TAB', 'TABLET', 'BOLUS', 'MG', 'MCG', 'GM', 'ML'))
-    )
-    if not is_pharma_capsule:
-        if re.search(r'\bCAPS?\b', s) or s.startswith('CAP ') or s.startswith('CAPS ') or ' CAP ' in s or ' CAPS ' in s:
-            return True
 
     return False
 
@@ -431,6 +449,27 @@ def parse_expiry_date(val: Any) -> datetime | None:
     # Strip prefixes like EXP:, EXP., EXP, BB:, B.B., E:
     s = re.sub(r'^(?:EXP|EXPDT|EXPIRY|BB|B\.B\.|E)[\s\.:\-_]*', '', s).strip()
 
+    # 0. Format: date-Month-year last two digit (e.g. 15-May-26, 01-Nov-25, 5-AUG-27, 10/Oct/26, 15.11.26, 25-08-26)
+    # Day-MonthName-2or4digitYear
+    m = re.match(r'^(\d{1,2})[\/\-\.\s]+([A-Za-z]{3,})[\/\-\.\s]+(\d{2,4})$', s)
+    if m:
+        d, m_str, y_str = int(m.group(1)), m.group(2).upper(), m.group(3)
+        month = MONTH_NAME_MAP.get(m_str) or MONTH_NAME_MAP.get(m_str[:3])
+        year = int(y_str)
+        if year < 100:
+            year += 2000
+        if month and 1 <= d <= 31 and 2000 <= year <= 2099:
+            max_d = calendar.monthrange(year, month)[1]
+            return datetime(year, month, min(d, max_d), 23, 59, 59)
+
+    # Day-numericMonth-2digitYear (e.g. 15-05-26, 25/08/26, 01-11-25)
+    m = re.match(r'^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})$', s)
+    if m:
+        d, m_val, y_val = int(m.group(1)), int(m.group(2)), int(m.group(3)) + 2000
+        if 1 <= m_val <= 12 and 1 <= d <= 31 and 2000 <= y_val <= 2099:
+            max_d = calendar.monthrange(y_val, m_val)[1]
+            return datetime(y_val, m_val, min(d, max_d), 23, 59, 59)
+
     # 1. Full date YYYY-MM-DD
     m = re.match(r'^(20\d{2})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})', s)
     if m:
@@ -502,6 +541,44 @@ def parse_expiry_date(val: Any) -> datetime | None:
         pass
 
     return None
+
+
+PROMO_NAME_KEYWORDS: tuple[str, ...] = (
+    'BAG', 'DIARY', 'SHIRT', 'CALENDER', 'CALENDAR', 'FOIL', 'BOX', 'PLAT CHARGES', 'PRODUCT', 'VISUAL-AID', 'PACKING'
+)
+
+
+def is_promotional_material(name: str, has_mfr: bool = False, has_sup: bool = False) -> bool:
+    """
+    Determines if an item is promotional/packaging material:
+    1. Product name contains promotional keywords: BAG, DIARY, SHIRT, CALENDER, CALENDAR, FOIL, BOX, PLAT CHARGES, PRODUCT, VISUAL-AID, PACKING.
+    2. Both manufacturer and supplier columns are blank in the input row.
+    """
+    name_upper = (name or '').upper()
+    if any(kw in name_upper for kw in PROMO_NAME_KEYWORDS):
+        return True
+    return (not has_mfr) and (not has_sup)
+
+
+def determine_expiry_category(exp_dt: datetime | None, is_promo: bool = False) -> str:
+    """
+    Populates product category directly based on pharmaceutical expiry date lifecycle.
+    - Promo Material: promotional items or items with empty manufacturer and supplier
+    - Expired / Phased Out: batch expiry date is in the past
+    - Near-Expiry (<180d): batch expiry date is within 180 days
+    - Active Shelf-Life: batch expiry date is healthy (> 180 days)
+    """
+    if is_promo:
+        return 'Promo Material'
+    if not exp_dt:
+        return 'General / No Expiry'
+    now_dt = datetime.utcnow()
+    if exp_dt < now_dt:
+        return 'Expired / Phased Out'
+    elif exp_dt <= now_dt + timedelta(days=180):
+        return 'Near-Expiry (<180d)'
+    else:
+        return 'Active Shelf-Life'
 
 
 def _find_header_row(df_raw: pd.DataFrame) -> int:
@@ -712,11 +789,32 @@ class MargExcelParser:
         cleaned_col_names = [_clean_alpha(c) for c in df.columns]
 
         # Determine report type
+        has_stock_cols = any(c in cleaned_col_names for c in [
+            'clstock', 'closingstock', 'currentstock', 'currstock', 'stock',
+            'batchno', 'bno', 'batch', 'expdate', 'expirydate', 'exp', 'expiry'
+        ])
+
+        has_explicit_sales_cols = any(c in cleaned_col_names for c in [
+            'qtysold', 'soldqty', 'sold', 'saleqty', 'billedqty', 'saledate', 'billdate'
+        ])
+
+        has_general_sales_cols = (
+            any(c in cleaned_col_names for c in ['quantity', 'qty']) and
+            any(c in cleaned_col_names for c in ['rate', 'avrate', 'amount', 'val', 'value', 'free', 'freeqty']) and
+            not has_stock_cols
+        )
+
         is_sales_report = (
-            ('sales summary' in banner_text) or
-            ('sales report' in banner_text) or
-            ('sales' in file_lower) or
-            ('sale' in sheet_lower and 'summary' in sheet_lower) or
+            any(kw in banner_text for kw in (
+                'sales summary', 'sales report', 'sale report', 'sale summary',
+                'sale statement', 'sales statement', 'sale register', 'sales register',
+                'item wise sale', 'party wise sale', 'sales analysis', 'sale analysis',
+                'sale book', 'sales book', 'daily sale', 'monthly sale'
+            )) or
+            any(kw in file_lower for kw in ('sales', 'sale', 'billing', 'dispatch')) or
+            any(kw in sheet_lower for kw in ('sales', 'sale', 'billing', 'dispatch')) or
+            has_explicit_sales_cols or
+            has_general_sales_cols or
             ('sale_date' in df_renamed.columns and 'qty_sold' in df_renamed.columns)
         )
 
@@ -809,7 +907,7 @@ class MargExcelParser:
                 except ValueError:
                     pass
 
-        # Identify columns
+        # Identify columns — handles all known MARG sales report column header variants
         name_col = None
         qty_col = None
         free_col = None
@@ -817,13 +915,17 @@ class MargExcelParser:
 
         for c in df.columns:
             c_norm = _clean_alpha(c)
-            if c_norm in ('itemdescription', 'particulars', 'itemname', 'productname', 'item'):
+            if c_norm in (
+                'itemdescription', 'particulars', 'itemname', 'productname', 'item',
+                'itemdesc', 'description', 'desc', 'name', 'productdescription',
+                'productdesc', 'medicinename', 'drugname', 'medicineitemname',
+            ):
                 name_col = c
-            elif c_norm in ('quantity', 'qtysold', 'qty', 'sold'):
+            elif c_norm in ('quantity', 'qtysold', 'qty', 'sold', 'billedqty', 'totalqty', 'saleqty'):
                 qty_col = c
-            elif c_norm in ('free', 'freeqty'):
+            elif c_norm in ('free', 'freeqty', 'freeunit', 'freequantity'):
                 free_col = c
-            elif c_norm in ('avrate', 'rate', 'cost', 'unitcost'):
+            elif c_norm in ('avrate', 'rate', 'cost', 'unitcost', 'averagerate', 'avgrate', 'mrp'):
                 rate_col = c
 
         if not name_col:
@@ -836,42 +938,36 @@ class MargExcelParser:
             if not name or is_footer_or_junk_row(name):
                 continue
 
-            qty = _parse_float(row.get(qty_col), 0.0) if qty_col else 0.0
+            qty  = _parse_float(row.get(qty_col), 0.0) if qty_col else 0.0
             free = _parse_float(row.get(free_col), 0.0) if free_col else 0.0
             total_sold = qty + free
             rate = _parse_float(row.get(rate_col), 0.0) if rate_col else 0.0
 
             code = _make_stable_code(name)
-            pack_size = parse_pack_size(name)
 
-            # Auto-register product
-            if code not in seen_products:
-                out['products'].append({
-                    'product_code': code,
-                    'product_name': name,
-                    'category': 'Pharmaceuticals',
-                    'unit': 'strip/pack',
-                    'pack_size': pack_size,
-                    'min_order_qty': 1.0,
-                    'unit_cost': 0.0,  # Sales summary has selling rates, NOT procurement cost price
-                    'reorder_point': 0.0,
-                    'reorder_enabled': True,
-                    'preferred_supplier_id': None,
-                })
-                seen_products.add(code)
-
-            # Insert sales history lines spread across lookback days so DemandService gets exact daily rate
+            # ONE row per product — no synthetic spreading.
+            # qty_sold is normalised to the DemandService lookback window (90 days)
+            # so that avg_daily = sum(qty_sold) / 90 returns the correct daily rate.
+            #
+            # Formula:
+            #   daily_rate       = total_sold / period_days
+            #   normalised_qty   = daily_rate × 90
+            #
+            # Example: 240 units sold over 176 days
+            #   daily_rate     = 240 / 176  = 1.363 units/day
+            #   normalised_qty = 1.363 × 90 = 122.7
+            #   DemandService  : 122.7 / 90 = 1.363 ✓
             if total_sold > 0:
+                DEMAND_LOOKBACK = 90
                 daily_rate = total_sold / max(1.0, float(period_days))
-                # Insert 30 representative daily points over the recent 30-day window
-                for d in range(30):
-                    s_date = end_date - timedelta(days=d)
-                    out['sales_history'].append({
-                        'product_code': code,
-                        'sale_date': s_date,
-                        'qty_sold': round(daily_rate, 4),
-                        'channel': 'retail',
-                    })
+                normalised_qty = round(daily_rate * DEMAND_LOOKBACK, 4)
+                out['sales_history'].append({
+                    'product_code': code,
+                    'product_name': name,       # saved from ITEM DESCRIPTION column
+                    'sale_date': end_date,      # single representative date (end of report period)
+                    'qty_sold': normalised_qty,
+                    'channel': 'retail',
+                })
 
     @classmethod
     def _extract_purchase_summary(
@@ -1073,13 +1169,27 @@ class MargExcelParser:
             cost_val = (
                 _parse_float(row.get('unit_cost')) or
                 _parse_float(row.get('Cost Price')) or
+                _parse_float(row.get('Cost Price ')) or
                 _parse_float(row.get('COST PRICE')) or
                 _parse_float(row.get('costprice')) or
                 _parse_float(row.get('COST')) or
                 _parse_float(row.get('Purchase Price')) or
+                _parse_float(row.get('pur_rate')) or
                 _parse_float(row.get('NET')) or
                 _parse_float(row.get('RATE')) or
-                _parse_float(row.get('M.R.P.'))
+                _parse_float(row.get('M.R.P.')) or
+                0.0
+            )
+
+            manufacturer = (
+                _clean_str(row.get('manufacturer')) or
+                _clean_str(row.get('Manufacturer')) or
+                _clean_str(row.get('MANUFACTURER')) or
+                _clean_str(row.get('mfr')) or
+                _clean_str(row.get('Mfr')) or
+                _clean_str(row.get('MFG BY')) or
+                _clean_str(row.get('mfg_by')) or
+                None
             )
 
             supplier_name = sanitize_supplier_name(row.get('supplier_name'))
@@ -1102,40 +1212,60 @@ class MargExcelParser:
                 })
                 seen_suppliers.add(supplier_id)
 
-            cat_upper = category.upper().strip()
-            is_discontinued = cat_upper.startswith('ZZZZ') or any(w in cat_upper for w in ('DISCONTINUED', 'OBSOLETE', 'DORMANT', 'ARCHIVE'))
+            has_mfr = bool(manufacturer and str(manufacturer).strip() and str(manufacturer).strip().upper() not in ('NAN', 'NONE', '-', '0'))
+            has_sup = bool(supplier_name and str(supplier_name).strip() and str(supplier_name).strip().upper() not in ('NAN', 'NONE', '-', '0'))
+            is_promo = is_promotional_material(name, has_mfr=has_mfr, has_sup=has_sup)
 
-            if code not in seen_products:
-                out['products'].append({
-                    'product_code': code,
-                    'product_name': name,
-                    'category': category,
-                    'company': company,
-                    'unit': unit,
-                    'pack_size': pack_size,
-                    'min_order_qty': min_order_qty,
-                    'unit_cost': cost_val,
-                    'reorder_point': reorder_point,
-                    'reorder_enabled': not is_discontinued,
-                    'preferred_supplier_id': supplier_id if (supplier_id and supplier_name) else None,
-                })
-                seen_products.add(code)
-
-            # Inventory batch
+            # Inventory batch details
             batch_no = _clean_str(row.get('batch_no')) or 'DEFAULT'
             if batch_no != 'DEFAULT':
                 batch_no = re.sub(r'^(?:ml|gm|mg|ltr|lt|kg|pcs|tab|cap)(?=[A-Z0-9\-\s])', '', batch_no, flags=re.I).strip() or batch_no
-            qty_on_hand = _parse_float(row.get('qty_on_hand'), 0.0)
+            qty_on_hand = (
+                _parse_float(row.get('qty_on_hand')) or
+                _parse_float(row.get('Current Stock')) or
+                _parse_float(row.get('CURRENT STOCK')) or
+                _parse_float(row.get('current_stock')) or
+                _parse_float(row.get('Closing Stock')) or
+                _parse_float(row.get('CL. STOCK')) or
+                0.0
+            )
             qty_on_order = _parse_float(row.get('qty_on_order'), 0.0)
             expiry_val = row.get('expiry_date')
             expiry_dt = parse_expiry_date(expiry_val)
             if not expiry_dt and batch_no and batch_no != 'DEFAULT':
                 expiry_dt = parse_expiry_date(batch_no)
 
+            # Category populated directly based on pharmaceutical expiry date lifecycle
+            cat_expiry = determine_expiry_category(expiry_dt, is_promo=is_promo)
+            is_discontinued = (cat_expiry == 'Expired / Phased Out')
+
+            # Every input row is preserved in products table with its specific unit cost and batch details
+            out['products'].append({
+                'product_code': code,
+                'product_name': name,
+                'batch_no': batch_no,
+                'expiry_date': expiry_dt,
+                'category': cat_expiry,
+                'company': company,
+                'manufacturer': manufacturer,
+                'is_promo_material': is_promo,
+                'is_stock_row': True,
+                'unit': unit,
+                'pack_size': pack_size,
+                'min_order_qty': min_order_qty,
+                'unit_cost': cost_val,
+                'current_stock': qty_on_hand,
+                'reorder_point': reorder_point,
+                'reorder_enabled': (not is_discontinued) and (not is_promo),
+                'supplier_name': supplier_name,
+                'preferred_supplier_id': supplier_id if (supplier_id and supplier_name) else None,
+            })
+
             out['inventory_batches'].append({
                 'product_code': code,
                 'batch_no': batch_no,
                 'company': company,
+                'manufacturer': manufacturer,
                 'qty_on_hand': qty_on_hand,
                 'qty_on_order': qty_on_order,
                 'expiry_date': expiry_dt,
@@ -1156,27 +1286,13 @@ class MargExcelParser:
             if not code:
                 code = _make_stable_code(name)
 
-            if code not in seen_products:
-                out['products'].append({
-                    'product_code': code,
-                    'product_name': name or code,
-                    'category': 'Sales Import',
-                    'unit': 'unit',
-                    'pack_size': 1.0,
-                    'min_order_qty': 1.0,
-                    'unit_cost': 0.0,
-                    'reorder_point': 0.0,
-                    'reorder_enabled': True,
-                    'preferred_supplier_id': None,
-                })
-                seen_products.add(code)
-
             date_val = row.get('sale_date')
             sale_dt = parse_expiry_date(date_val) or datetime.utcnow()
             qty = _parse_float(row.get('qty_sold'), 0.0)
             if qty > 0:
                 out['sales_history'].append({
                     'product_code': code,
+                    'product_name': name or code,
                     'sale_date': sale_dt,
                     'qty_sold': qty,
                     'channel': _clean_str(row.get('channel')) or 'retail',

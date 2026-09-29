@@ -63,7 +63,7 @@ class InventoryService:
         horizon = now + timedelta(days=settings.expiry_risk_horizon_days)
 
         from backend.app.adapters.excel import pharma_canonical_key
-        prod = self.db.get(Product, product_code)
+        prod = self.db.scalars(select(Product).where(Product.product_code == product_code)).first()
         alt_codes = [product_code]
         if prod:
             c_key = pharma_canonical_key(prod.product_name)

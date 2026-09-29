@@ -26,20 +26,14 @@ except ImportError:
 
 def is_excluded_product(name: str) -> bool:
     """
-    Excludes non-medicine and promotional items matching user-blacklisted keywords:
-    'PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG ', 'product card', 'visual aid', 'visiting', 'cylinder' and summary footer rows.
+    Identifies empty product names or pure footer banner rows.
+    Keyword-based exclusions have been removed so all valid items are displayed.
+    Promotional items are isolated via the backend is_promo_material flag into the Promo Material tab.
     """
     if not name:
         return True
     s_upper = str(name).strip().upper()
-    for kw in ('PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG '):
-        if kw in s_upper:
-            return True
-    nl = s_upper.lower().replace('-', ' ')
-    blacklist = ['product card', 'visual aid', 'visiting', 'cylinder']
-    if any(b in nl for b in blacklist):
-        return True
-    if re.search(r'^\d+\s*items?$', nl.strip()):
+    if re.search(r'^\d+\s*ITEMS?$', s_upper) or s_upper in ('TOTAL', 'GRAND TOTAL', 'SUB TOTAL', 'SUMMARY'):
         return True
     return False
 
@@ -185,6 +179,9 @@ approved = [p for p in valid_proposals if p.get('status') in ('APPROVED_PENDING_
 total_pending_val = sum(p.get('estimated_value', 0) for p in pending)
 high_expiry_items = sum(1 for p in pending if p.get('expiry_risk_score', 0) >= 0.25)
 
+if "upload_banner" in st.session_state and st.session_state["upload_banner"]:
+    st.success(st.session_state.pop("upload_banner"))
+
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 with col_m1:
     st.metric("Pending Orders for Review", len(pending))
@@ -204,6 +201,7 @@ TAB_CONFIG = [
     ("approved", "📦 Approved Orders / PO Export"),
     ("no_reorder", "🛡️ No Need for Reorder"),
     ("inventory", "📊 Inventory & FEFO Expiry"),
+    ("promo_material", "🎁 Promo Material"),
     ("audit", "📜 Compliance Audit Log"),
     ("logs", "📋 Live Rolling Logs"),
 ]
@@ -227,7 +225,7 @@ def on_main_tab_changed():
         st.query_params["tab"] = LABEL_TO_SLUG[selected]
 
 # Main Tabs with full state persistence across reruns and page refreshes
-tab_upload, tab_proposals, tab_approved, tab_no_reorder, tab_inventory, tab_audit, tab_logs = st.tabs(
+tab_upload, tab_proposals, tab_approved, tab_no_reorder, tab_inventory, tab_promo, tab_audit, tab_logs = st.tabs(
     TAB_LABELS,
     default=default_tab_label,
     key="main_active_tab",
@@ -278,7 +276,10 @@ with tab_upload:
             try:
                 p_res = requests.post(f"{BACKEND_URL}/system/reset-db", timeout=10)
                 if p_res.status_code == 200:
-                    st.success("✅ Database purged completely! Historical data cleared.")
+                    st.session_state['uploader_version'] = st.session_state.get('uploader_version', 0) + 1
+                    st.session_state.pop('last_upload_stats', None)
+                    st.session_state.pop('last_upload_success_files', None)
+                    st.session_state["upload_banner"] = "✅ Database purged completely! All historical data and uploaded documents cleared."
                     st.rerun()
                 else:
                     st.error(f"Error resetting database: {p_res.text}")
@@ -286,12 +287,30 @@ with tab_upload:
                 st.error(f"Reset error: {e}")
 
     with col_up1:
+        uploader_key = f"marg_file_uploader_{st.session_state.get('uploader_version', 0)}"
         uploaded_files = st.file_uploader(
             "Select MARG Export file(s) (.xlsx, .xls, or .csv) — You can select multiple files at once!",
             type=["xlsx", "xls", "csv"],
             accept_multiple_files=True,
+            key=uploader_key,
             help="Upload raw MARG ERP exports directly without reformatting (Closing Stock, Manufacturer List, PCD Outstanding, etc.)"
         )
+
+        # Show previous ingestion summary if available and no new files actively staged
+        if not uploaded_files and "last_upload_stats" in st.session_state and st.session_state["last_upload_stats"]:
+            stats = st.session_state["last_upload_stats"]
+            n_files = st.session_state.get("last_upload_success_files", 1)
+            st.success(f"✅ Ingested {n_files} file(s) into database:")
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            col_s1.metric("Products Updated", stats.get('products_upserted', 0))
+            col_s2.metric("Batches Recorded", stats.get('batches_inserted', 0))
+            col_s3.metric("Suppliers Updated", stats.get('suppliers_upserted', 0))
+            col_s4.metric("Sales Rows Imported", stats.get('sales_inserted', 0))
+            st.info("👉 Switch to the **'Review & Correct Suggestions'** tab to review, adjust, and approve order suggestions!")
+            if st.button("👉 Go to Review & Correct Suggestions", type="primary", key="nav_to_proposals_btn"):
+                st.session_state.pop("main_active_tab", None)
+                st.query_params["tab"] = "proposals"
+                st.rerun()
 
         col_opt1, col_opt2 = st.columns([1, 1])
         with col_opt1:
@@ -353,29 +372,17 @@ with tab_upload:
                                     stats = res_json.get('stats', {})
                                     for k in cumulative_stats:
                                         cumulative_stats[k] += stats.get(k, 0)
-                                    
-                                    if should_run_agent and res_json.get('agent_run'):
-                                        agent_run = res_json['agent_run']
-                                        num_proposals = agent_run.get('proposals_count', 0)
-                                        st.balloons()
-                                        st.success(f"🎉 **Ingestion & Analysis Complete!** Generated **{num_proposals}** procurement recommendations across {success_files} file(s).")
                                 else:
                                     st.error(f"Upload failed for {f.name}: {upload_res.text}")
                             except Exception as exc:
                                 st.error(f"Error processing {f.name}: {exc}")
 
                         if success_files > 0:
-                            st.success(f"✅ Ingested {success_files} file(s) into database:")
-                            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-                            col_s1.metric("Products Updated", cumulative_stats['products_upserted'])
-                            col_s2.metric("Batches Recorded", cumulative_stats['batches_inserted'])
-                            col_s3.metric("Suppliers Updated", cumulative_stats['suppliers_upserted'])
-                            col_s4.metric("Sales Rows Imported", cumulative_stats['sales_inserted'])
-                            st.info("👉 Switch to the **'Review & Correct Suggestions'** tab to review, adjust, and approve order suggestions!")
-                            if st.button("👉 Go to Review & Correct Suggestions", type="primary", key="nav_to_proposals_btn"):
-                                st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
-                                st.query_params["tab"] = "proposals"
-                                st.rerun()
+                            st.session_state['uploader_version'] = st.session_state.get('uploader_version', 0) + 1
+                            st.session_state["last_upload_stats"] = cumulative_stats
+                            st.session_state["last_upload_success_files"] = success_files
+                            st.session_state["upload_banner"] = f"🎉 Ingestion & Analysis Complete! Processed {success_files} file(s). Top KPI metrics & order suggestions are now updated and synchronized with the DB."
+                            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -384,14 +391,15 @@ with tab_upload:
 with tab_proposals:
     st.subheader("2. Human-in-the-Loop: Review, Correct & Approve Suggestions")
     st.markdown("""
-    The agent computes recommended quantities based on sales velocity, lead times, safety buffers, and FEFO expiry risk.
+    The agent computes recommended replenishment quantities based on sales velocity, lead times, and safety stock.
+    **🛡️ High-risk and near-expiry products are automatically excluded from reorder suggestions** (inspected in Tab 4: Inventory & FEFO Expiry).
     **You have full control to correct any value (quantity, supplier, notes) before approving.**
     """)
 
-    col_ref, col_comp, col_filt, col_risk = st.columns([1, 2, 1.5, 2])
+    col_ref, col_comp, col_mfr, col_filt, col_risk = st.columns([1, 2, 2, 1.5, 2])
     with col_ref:
         if st.button("🔄 Refresh Data", key="refresh_proposals_btn"):
-            st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+            st.session_state.pop("main_active_tab", None)
             st.query_params["tab"] = "proposals"
             st.rerun()
 
@@ -408,10 +416,26 @@ with tab_proposals:
     # Filter out blacklisted non-medicine items
     raw_proposals = [p for p in raw_proposals if not is_excluded_product(p.get('product_name', ''))]
 
+    # Exclude high and near-expiry risk products from Review and Correct suggestions tab
+    raw_proposals = [
+        p for p in raw_proposals
+        if not (
+            p.get('expiry_risk_score', 0) > 0 or
+            p.get('near_expiry_qty', 0) > 0 or
+            p.get('expiry_action') in ('PAUSE_PROCUREMENT', 'REDUCE_ORDER') or
+            p.get('recommended_qty', 0) <= 0
+        )
+    ]
+
     # Compute company list from raw proposals
     available_companies = sorted(list({p.get('company') for p in raw_proposals if p.get('company') and p.get('company') != 'None'}))
     company_counts = {c: sum(1 for p in raw_proposals if p.get('company') == c) for c in available_companies}
     company_options = ["All Companies"] + available_companies
+
+    # Compute manufacturer list from raw proposals
+    available_mfrs = sorted(list({p.get('manufacturer') for p in raw_proposals if p.get('manufacturer') and p.get('manufacturer') not in ('None', 'General', '')}))
+    mfr_counts = {m: sum(1 for p in raw_proposals if p.get('manufacturer') == m) for m in available_mfrs}
+    mfr_options = ["All Manufacturers"] + available_mfrs
 
     with col_comp:
         selected_company = st.selectbox(
@@ -422,13 +446,22 @@ with tab_proposals:
             help="Filter recommendations by pharmaceutical company"
         )
 
+    with col_mfr:
+        selected_mfr = st.selectbox(
+            "🏭 Filter by Manufacturer",
+            options=mfr_options,
+            format_func=lambda m: f"{m} ({mfr_counts.get(m, len(raw_proposals))} rows)" if m != "All Manufacturers" else f"All Manufacturers ({len(raw_proposals)} rows)",
+            key="proposal_mfr_filter",
+            help="Filter recommendations by medicine manufacturer"
+        )
+
     with col_filt:
         status_filter = st.selectbox("Filter Status", ["PENDING", "APPROVED_PENDING_EXECUTION", "EXECUTED", "REJECTED", "ALL"])
 
     with col_risk:
-        risk_filter = st.selectbox(
-            "Expiry Risk Filter",
-            ["All Risk Levels", "⚠️ Near-Expiry / Risk Products Only", "⛔ High Risk Only (PAUSE/REDUCE)"]
+        qty_filter = st.selectbox(
+            "Order Qty Flag",
+            ["All Order Sizes", "🚩 High Qty (>50)", "🟡 Normal Qty (≤50)"]
         )
 
     # Apply Filters
@@ -436,26 +469,23 @@ with tab_proposals:
     if selected_company != "All Companies":
         current_proposals = [p for p in current_proposals if p.get('company') == selected_company]
 
+    if selected_mfr != "All Manufacturers":
+        current_proposals = [p for p in current_proposals if p.get('manufacturer') == selected_mfr]
+
     if status_filter != "ALL":
         current_proposals = [p for p in current_proposals if p.get('status') == status_filter]
 
-    # Apply Expiry Risk Filter
-    if risk_filter == "⚠️ Near-Expiry / Risk Products Only":
-        current_proposals = [
-            p for p in current_proposals
-            if p.get('expiry_risk_score', 0) >= 0.25 or p.get('near_expiry_qty', 0) > 0
-        ]
-    elif risk_filter == "⛔ High Risk Only (PAUSE/REDUCE)":
-        current_proposals = [
-            p for p in current_proposals
-            if p.get('expiry_risk_score', 0) >= 0.50
-        ]
+    # Apply Order Quantity Flag Filter
+    if qty_filter == "🚩 High Qty (>50)":
+        current_proposals = [p for p in current_proposals if p.get('recommended_qty', 0) > 50]
+    elif qty_filter == "🟡 Normal Qty (≤50)":
+        current_proposals = [p for p in current_proposals if 0 < p.get('recommended_qty', 0) <= 50]
 
     # Sort alphabetically by product name (A-Z)
     current_proposals.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
 
     # Dynamic Search placeholder reflecting row count and selected company
-    search_placeholder = f"Search within {len(current_proposals)} rows for {selected_company} (product name or code)..."
+    search_placeholder = f"Search within {len(current_proposals)} rows (product name or code)..."
     col_search, col_clear_search = st.columns([4, 1])
     with col_search:
         search_kw = st.text_input(
@@ -468,7 +498,7 @@ with tab_proposals:
     with col_clear_search:
         if st.button("🔄 Reset Search", use_container_width=True, key="proposal_reset_search_btn"):
             search_kw = ""
-            st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+            st.session_state.pop("main_active_tab", None)
             st.query_params["tab"] = "proposals"
             st.rerun()
 
@@ -481,15 +511,15 @@ with tab_proposals:
     # Showcase number of rows in the tab as well as active filter status
     st.info(
         f"📋 **Showing {len(current_proposals)} row(s)** in Review & Correct Suggestions "
-        f"(Filtered by Company: **{selected_company}** | Status: **{status_filter}** | Expiry: **{risk_filter}** | Out of {len(raw_proposals)} total)"
+        f"(Filtered by Company: **{selected_company}** | Manufacturer: **{selected_mfr}** | Status: **{status_filter}** | Order Qty: **{qty_filter}** | Out of {len(raw_proposals)} total)"
     )
 
     if not current_proposals:
-        if selected_company != "All Companies" or search_kw:
+        if selected_company != "All Companies" or selected_mfr != "All Manufacturers" or search_kw:
             st.warning(
-                f"No proposal rows found matching company '{selected_company}'"
+                f"No proposal rows found matching company '{selected_company}' and manufacturer '{selected_mfr}'"
                 + (f" with keyword '{search_kw}'" if search_kw else "")
-                + " (0 rows displayed). Select 'All Companies' or clear search to view more rows."
+                + " (0 rows displayed). Select 'All Companies' / 'All Manufacturers' or clear search to view more rows."
             )
         else:
             st.info("No proposals found for the selected filter. Upload a MARG Excel or click below to trigger a run:")
@@ -498,7 +528,7 @@ with tab_proposals:
                     r_res = requests.post(f"{BACKEND_URL}/runs", json={"lead_time_days": int(config_lead_time)}, timeout=30)
                     if r_res.status_code == 201:
                         st.success("Procurement Run finished!")
-                        st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+                        st.session_state.pop("main_active_tab", None)
                         st.query_params["tab"] = "proposals"
                         st.rerun()
                     else:
@@ -535,9 +565,13 @@ with tab_proposals:
                 {
                     'Product Code': p['product_code'],
                     'Product Name': p['product_name'],
+                    'Order Qty Flag': '🚩 > 50 (High Qty)' if p['recommended_qty'] > 50 else '🟡 ≤ 50 (Normal Qty)',
                     'Company': p.get('company', 'General'),
+                    'Manufacturer': p.get('manufacturer', 'General'),
+                    'Default Supplier': p.get('supplier_name', 'Default Supplier'),
+                    'Batch(es)': p.get('batch_numbers', 'DEFAULT'),
                     'Recommended Qty': p['recommended_qty'],
-                    'Unit Cost (₹)': p['unit_cost'],
+                    'Last Purchase Cost (₹)': p['unit_cost'],
                     'Total Value (₹)': p['estimated_value'],
                     'Avg Daily Demand': p['avg_daily_demand'],
                     'Stock on Hand': p['stock_on_hand'],
@@ -595,10 +629,19 @@ with tab_proposals:
             else:
                 risk_badge = f'<span class="badge-fefo-ok">✅ Stock Shelf-Life Healthy (FEFO Clean)</span>'
 
+            # Order quantity color flag
+            qty_flag_icon = "🚩" if p['recommended_qty'] > 50 else "🟡"
+            qty_flag_text = "🚩 High Qty (>50)" if p['recommended_qty'] > 50 else "🟡 Normal Qty (≤50)"
+
             with st.expander(
-                f"**{p['product_name']}** (`{p['product_code']}`) | 🏢 **{p.get('company', 'General')}** — Suggested: **{p['recommended_qty']:g} units** (₹{p['estimated_value']:,.2f}) | Status: :{st_color}[{p['status']}]",
+                f"{qty_flag_icon} **{p['product_name']}** (`{p['product_code']}`) | 🏢 **{p.get('company', 'General')}** | 🏭 **{p.get('manufacturer', 'General')}** | 🚚 Supplier: **{p.get('supplier_name', 'Default Supplier')}** | 🏷️ Batch(es): `{p.get('batch_numbers', 'DEFAULT')}` — Suggested: **{p['recommended_qty']:g} units** [{qty_flag_text}] (₹{p['estimated_value']:,.2f}) | Status: :{st_color}[{p['status']}]",
                 expanded=(p['status'] == 'PENDING' and len(page_proposals) <= 5)
             ):
+                if p['recommended_qty'] > 50:
+                    st.error(f"🚩 **Order Quantity Red Flag (> 50 Units)**: Recommended order quantity is **{p['recommended_qty']:g} units** (> 50 units). Default supplier: **{p.get('supplier_name', 'Default Supplier')}**, Last purchase cost: **₹{p.get('unit_cost', 0):.2f}**.")
+                else:
+                    st.warning(f"🟡 **Order Quantity Yellow Flag (≤ 50 Units)**: Recommended order quantity is **{p['recommended_qty']:g} units** (≤ 50 units). Default supplier: **{p.get('supplier_name', 'Default Supplier')}**, Last purchase cost: **₹{p.get('unit_cost', 0):.2f}**.")
+
                 st.markdown(risk_badge, unsafe_allow_html=True)
                 st.markdown(f"**Agent Rationale:** {p.get('rationale', 'N/A')}")
 
@@ -609,6 +652,10 @@ with tab_proposals:
                 c3.metric("Near-Expiry Stock", f"{p.get('near_expiry_qty', 0):g}")
                 c4.metric("Avg Daily Demand", f"{p.get('avg_daily_demand', 0):.2f}/day")
                 c5.metric("Lead Time", f"{p.get('lead_time_days', int(config_lead_time))} days")
+
+                csup1, csup2 = st.columns(2)
+                csup1.info(f"🚚 **Default Supplier (Last Purchased):** {p.get('supplier_name', 'Default Supplier')}")
+                csup2.info(f"💰 **Last Purchase Cost:** ₹{p.get('unit_cost', 0):.2f} per unit")
 
                 unit_cost = p.get('unit_cost', 0)
 
@@ -677,11 +724,14 @@ with tab_proposals:
                                 )
                                 if decide_res.status_code == 200:
                                     st.success(f"Proposal for {p['product_name']} successfully approved!")
-                                    st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+                                    st.session_state.pop("main_active_tab", None)
                                     st.query_params["tab"] = "proposals"
                                     st.rerun()
                                 else:
-                                    err_msg = decide_res.json().get('detail', decide_res.text)
+                                    try:
+                                        err_msg = decide_res.json().get('detail', decide_res.text)
+                                    except Exception:
+                                        err_msg = decide_res.text
                                     st.error(f"Approval blocked by guardrail: {err_msg}")
 
                     with col_btn2:
@@ -699,7 +749,7 @@ with tab_proposals:
                                 )
                                 if decide_res.status_code == 200:
                                     st.warning(f"Proposal {p_id} rejected.")
-                                    st.session_state["main_active_tab"] = "💡 Review & Correct Suggestions"
+                                    st.session_state.pop("main_active_tab", None)
                                     st.query_params["tab"] = "proposals"
                                     st.rerun()
                                 else:
@@ -814,9 +864,19 @@ with tab_no_reorder:
     nr_company_counts = {c: sum(1 for p in no_reorder_items if p.get('company') == c) for c in nr_companies}
     nr_company_options = ["All Companies"] + nr_companies
 
+    # Compute manufacturer list from no-reorder items
+    nr_mfrs = sorted(list({p.get('manufacturer') for p in no_reorder_items if p.get('manufacturer') and p.get('manufacturer') not in ('None', 'General', '')}))
+    nr_mfr_counts = {m: sum(1 for p in no_reorder_items if p.get('manufacturer') == m) for m in nr_mfrs}
+    nr_mfr_options = ["All Manufacturers"] + nr_mfrs
+
     # Top Metrics Bar
     if total_no_reorder_count > 0:
-        total_healthy_val = sum(p.get('inventory_value', 0.0) for p in no_reorder_items)
+        total_healthy_val = sum(
+            p.get('healthy_stock_value', p.get('inventory_value',
+                p.get('available_stock', p.get('usable_before_expiry', 0.0)) * p.get('unit_cost', 0.0)
+            ))
+            for p in no_reorder_items
+        )
         avg_cov_days = sum(min(p.get('coverage_days', 0.0), 365.0) for p in no_reorder_items) / total_no_reorder_count
         zero_risk_count = sum(1 for p in no_reorder_items if p.get('expiry_risk_score', 0.0) == 0.0)
 
@@ -824,17 +884,22 @@ with tab_no_reorder:
         with col_nr1:
             st.metric("Total Products Not Needing Reorder", total_no_reorder_count)
         with col_nr2:
-            st.metric("Capital in Healthy Stock", f"₹{total_healthy_val:,.2f}")
+            st.metric("Total Healthy Stock Valuation", f"₹{total_healthy_val:,.2f}")
         with col_nr3:
             st.metric("Avg Inventory Coverage", f"{avg_cov_days:.1f} days")
         with col_nr4:
             st.metric("100% FEFO Healthy", f"{zero_risk_count / total_no_reorder_count:.0%}")
 
+        st.success(
+            f"💰 **Total Healthy Stock Valuation:** **₹{total_healthy_val:,.2f}** "
+            f"(Computed across all {total_no_reorder_count} covered products by multiplying available healthy stock with purchase cost for each individual product and summing the total)."
+        )
+
     st.markdown("---")
 
-    # Search Bar with Company Filter, dedicated Search and Reset Buttons
+    # Search Bar with Company & Manufacturer Filters, dedicated Search and Reset Buttons
     st.markdown("##### 🔍 Search & Filter Products")
-    col_nr_comp, col_s1, col_s2, col_s3 = st.columns([2, 3, 1, 1])
+    col_nr_comp, col_nr_mfr, col_s1, col_s2, col_s3 = st.columns([1.5, 1.5, 2.5, 1, 1])
 
     with col_nr_comp:
         selected_nr_company = st.selectbox(
@@ -845,13 +910,25 @@ with tab_no_reorder:
             help="Filter surplus stock by pharmaceutical company"
         )
 
-    # Active company filter
+    with col_nr_mfr:
+        selected_nr_mfr = st.selectbox(
+            "🏭 Filter by Manufacturer",
+            options=nr_mfr_options,
+            format_func=lambda m: f"{m} ({nr_mfr_counts.get(m, total_no_reorder_count)} rows)" if m != "All Manufacturers" else f"All Manufacturers ({total_no_reorder_count} rows)",
+            key="no_reorder_mfr_filter",
+            help="Filter surplus stock by medicine manufacturer"
+        )
+
+    # Active filters
     display_items = list(no_reorder_items)
     if selected_nr_company != "All Companies":
         display_items = [p for p in display_items if p.get('company') == selected_nr_company]
 
+    if selected_nr_mfr != "All Manufacturers":
+        display_items = [p for p in display_items if p.get('manufacturer') == selected_nr_mfr]
+
     with col_s1:
-        nr_search_placeholder = f"Search within {len(display_items)} rows for {selected_nr_company} (e.g. medicine name, code)..."
+        nr_search_placeholder = f"Search within {len(display_items)} rows (e.g. medicine name, code)..."
         search_kw = st.text_input(
             "Search product by name or item code",
             value="",
@@ -866,7 +943,7 @@ with tab_no_reorder:
     with col_s3:
         if st.button("🔄 Show All Products", use_container_width=True, key="btn_clear_search_no_reorder"):
             search_kw = ""
-            st.session_state["main_active_tab"] = "🛡️ No Need for Reorder"
+            st.session_state.pop("main_active_tab", None)
             st.query_params["tab"] = "no_reorder"
             st.rerun()
 
@@ -881,10 +958,10 @@ with tab_no_reorder:
     display_items.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
 
     # Showcase number of rows in tab as well as placeholder
-    if selected_nr_company != "All Companies" or search_kw:
+    if selected_nr_company != "All Companies" or selected_nr_mfr != "All Manufacturers" or search_kw:
         st.info(
             f"📋 **Showing {len(display_items)} row(s)** with Net Need ≤ 0 "
-            f"(Filtered by Company: **{selected_nr_company}**"
+            f"(Filtered by Company: **{selected_nr_company}** | Manufacturer: **{selected_nr_mfr}**"
             + (f" | Keyword: `'{search_kw}'`" if search_kw else "")
             + f" | Out of **{total_no_reorder_count}** total products)."
         )
@@ -892,8 +969,8 @@ with tab_no_reorder:
         st.info(f"📋 **Total List Count**: Showing all **{total_no_reorder_count}** products with Net Need ≤ 0 in alphabetical order (A–Z). No reorder needed.")
 
     if not display_items:
-        if selected_nr_company != "All Companies" or search_kw:
-            st.warning(f"No products found for company '{selected_nr_company}'" + (f" matching '{search_kw}'" if search_kw else "") + " (0 rows displayed). Try a different company or click 'Show All Products'.")
+        if selected_nr_company != "All Companies" or selected_nr_mfr != "All Manufacturers" or search_kw:
+            st.warning(f"No products found for company '{selected_nr_company}' and manufacturer '{selected_nr_mfr}'" + (f" matching '{search_kw}'" if search_kw else "") + " (0 rows displayed). Try different filters or click 'Show All Products'.")
         else:
             st.info("No products currently have Net Need ≤ 0. Run the procurement agent after uploading stock and sales data.")
     else:
@@ -903,16 +980,19 @@ with tab_no_reorder:
                 'Product Name': p['product_name'],
                 'Product Code': p['product_code'],
                 'Company': p.get('company', 'General'),
+                'Manufacturer': p.get('manufacturer', 'General'),
+                'Default Supplier': p.get('supplier_name', 'Default Supplier'),
+                'Batch(es)': p.get('batch_numbers', 'DEFAULT'),
                 'Stock on Hand': p['stock_on_hand'],
-                'Usable Stock (FEFO)': p['usable_before_expiry'],
+                'Available Healthy Stock': p.get('available_stock', p.get('usable_before_expiry', 0.0)),
+                'Purchase Cost (₹)': p['unit_cost'],
+                'Healthy Stock Value (₹)': round(p.get('available_stock', p.get('usable_before_expiry', 0.0)) * p['unit_cost'], 2),
                 'On Order': p['stock_on_order'],
                 'Daily Demand': p['avg_daily_demand'],
                 'Target Required': p['target_stock'],
                 'Net Need': f"{p['net_need']:.2f}",
                 'Surplus Units': f"+{p['surplus_qty']:.2f}",
                 'Coverage (Days)': f"{p['coverage_days']:.1f}d" if p['coverage_days'] < 999 else "No Demand",
-                'Unit Cost (₹)': p['unit_cost'],
-                'Total Stock Value (₹)': p['inventory_value'],
                 'Status': "✅ Covered (No Reorder)",
             }
             for p in display_items
@@ -952,14 +1032,17 @@ with tab_no_reorder:
         page_items_nr = display_items[start_idx_nr:end_idx_nr]
 
         for p in page_items_nr:
+            avail_stock = p.get('available_stock', p.get('usable_before_expiry', 0.0))
+            healthy_val = round(avail_stock * p.get('unit_cost', 0.0), 2)
+
             with st.expander(
-                f"**{p['product_name']}** (`{p['product_code']}`) | 🏢 **{p.get('company', 'General')}** — Stock on Hand: **{p['stock_on_hand']:g} units** (Surplus: +{p['surplus_qty']:g} units) | Net Need: **{p['net_need']:g}**",
+                f"**{p['product_name']}** (`{p['product_code']}`) | 🏢 **{p.get('company', 'General')}** | 🏭 **{p.get('manufacturer', 'General')}** | 🚚 Supplier: **{p.get('supplier_name', 'Default Supplier')}** | 🏷️ Batch(es): `{p.get('batch_numbers', 'DEFAULT')}` — Healthy Stock: **{avail_stock:g} units** (₹{healthy_val:,.2f}) | Net Need: **{p['net_need']:g}**",
                 expanded=False
             ):
                 st.markdown(f"**Agent Rationale:** {p['rationale']}")
                 c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Stock on Hand", f"{p['stock_on_hand']:g}")
-                c2.metric("Usable (FEFO)", f"{p['usable_before_expiry']:g}")
+                c2.metric("Available Healthy Stock", f"{avail_stock:g}")
                 c3.metric("Stock on Order", f"{p['stock_on_order']:g}")
                 c4.metric("Avg Daily Demand", f"{p['avg_daily_demand']:.2f}/day")
                 c5.metric("Target Stock Needed", f"{p['target_stock']:g}")
@@ -967,8 +1050,8 @@ with tab_no_reorder:
                 c6, c7, c8, c9 = st.columns(4)
                 c6.metric("Net Need", f"{p['net_need']:g} units", delta=f"{p['net_need']:g} (No Reorder)")
                 c7.metric("Surplus Stock", f"+{p['surplus_qty']:g} units")
-                c8.metric("Days Coverage", f"{p['coverage_days']:.1f} days" if p['coverage_days'] < 999 else "No Demand")
-                c9.metric("Stock Capital", f"₹{p['inventory_value']:,.2f}")
+                c8.metric("Days Coverage", f"{p['coverage_days']:.1f}d" if p['coverage_days'] < 999 else "No Demand")
+                c9.metric("Healthy Stock Capital", f"₹{healthy_val:,.2f}", help="Available usable stock × Purchase cost")
 
 
 # ---------------------------------------------------------------------------
@@ -978,7 +1061,7 @@ with tab_inventory:
     st.subheader("4. Inventory Batches & FEFO Expiry Status")
     if is_healthy:
         try:
-            inv_res = requests.get(f"{BACKEND_URL}/inventory", timeout=5)
+            inv_res = requests.get(f"{BACKEND_URL}/inventory?exclude_healthy=true", timeout=10)
             if inv_res.status_code == 200 and inv_res.json():
                 df_inv = pd.DataFrame(inv_res.json())
 
@@ -1011,7 +1094,13 @@ with tab_inventory:
                     except Exception:
                         return "Unknown"
 
-                df_inv['FEFO Status'] = df_inv['expiry_date'].apply(calc_batch_fefo)
+                if 'fefo_status' in df_inv.columns:
+                    df_inv['FEFO Status'] = df_inv['fefo_status']
+                else:
+                    df_inv['FEFO Status'] = df_inv['expiry_date'].apply(calc_batch_fefo)
+
+                # Strictly isolate at-risk stock: exclude any Shelf-Life Healthy items from this tab
+                df_inv = df_inv[~df_inv['FEFO Status'].str.startswith("✅")]
 
                 # Format Expiry Date cleanly for display (YYYY-MM-DD or MM/YYYY)
                 def format_exp_date(exp_val):
@@ -1025,29 +1114,37 @@ with tab_inventory:
 
                 df_inv['Formatted Expiry'] = df_inv['expiry_date'].apply(format_exp_date)
 
-                cnt_total = len(df_inv)
-                cnt_near = (df_inv['FEFO Status'].str.startswith("⚠️")).sum()
-                cnt_exp = (df_inv['FEFO Status'] == "⛔ Expired").sum()
-                cnt_healthy = (df_inv['FEFO Status'] == "✅ Shelf-Life Healthy").sum()
+                # Placeholder for selected rows count (updates after filters are applied)
+                metric_selected_placeholder = st.empty()
 
-                col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-                col_f1.metric("Total Tracked Batches", cnt_total)
-                col_f2.metric("Near-Expiry Batches", int(cnt_near))
-                col_f3.metric("Expired Batches", int(cnt_exp))
-                col_f4.metric("Healthy Shelf-Life", int(cnt_healthy))
+                # Company & Manufacturer filters
+                inv_companies = sorted(list({c for c in df_inv['company'].dropna().unique() if c and c not in ('None', '')}))
+                inv_company_options = ["All Companies"] + inv_companies
 
-                col_srch, col_filt_fefo = st.columns([2, 1])
-                with col_srch:
-                    search_query = st.text_input("🔍 Search by Product Name or Batch No", "", key="inv_search")
+                inv_mfrs = sorted(list({m for m in df_inv['manufacturer'].dropna().unique() if m and m not in ('None', 'General', '')}))
+                inv_mfr_options = ["All Manufacturers"] + inv_mfrs
+
+                col_icomp, col_imfr, col_filt_fefo, col_srch = st.columns([1.5, 1.5, 1.5, 2])
+                with col_icomp:
+                    sel_inv_company = st.selectbox("🏢 Filter by Company", inv_company_options, key="inv_company_filter")
+                with col_imfr:
+                    sel_inv_mfr = st.selectbox("🏭 Filter by Manufacturer", inv_mfr_options, key="inv_mfr_filter")
                 with col_filt_fefo:
                     fefo_filter = st.selectbox(
                         "FEFO Expiry Filter",
-                        ["All Batches", "⚠️ Near-Expiry & Expired Only", "⚠️ Near-Expiry Only", "⛔ Expired Only"]
+                        ["⚠️ Near-Expiry & Expired (All At-Risk)", "⚠️ Near-Expiry Only (≤ 180d)", "⛔ Expired Only"],
+                        key="inv_fefo_filter"
                     )
+                with col_srch:
+                    search_query = st.text_input("🔍 Search Product Name or Batch", "", key="inv_search")
 
-                if fefo_filter == "⚠️ Near-Expiry & Expired Only":
+                if sel_inv_company != "All Companies":
+                    df_inv = df_inv[df_inv['company'] == sel_inv_company]
+                if sel_inv_mfr != "All Manufacturers":
+                    df_inv = df_inv[df_inv['manufacturer'] == sel_inv_mfr]
+                if fefo_filter == "⚠️ Near-Expiry & Expired (All At-Risk)":
                     df_inv = df_inv[df_inv['FEFO Status'].str.startswith(("⚠️", "⛔"))]
-                elif fefo_filter == "⚠️ Near-Expiry Only":
+                elif fefo_filter == "⚠️ Near-Expiry Only (≤ 180d)":
                     df_inv = df_inv[df_inv['FEFO Status'].str.startswith("⚠️")]
                 elif fefo_filter == "⛔ Expired Only":
                     df_inv = df_inv[df_inv['FEFO Status'] == "⛔ Expired"]
@@ -1055,33 +1152,157 @@ with tab_inventory:
                 if search_query:
                     mask = (
                         df_inv['product_name'].astype(str).str.contains(search_query, case=False, na=False) |
+                        df_inv['product_code'].astype(str).str.contains(search_query, case=False, na=False) |
                         df_inv['batch_no'].astype(str).str.contains(search_query, case=False, na=False)
                     )
                     df_inv = df_inv[mask]
 
-                # Product Name in place of Item Code
-                cols_to_display = ['product_name']
-                if 'category' in df_inv.columns:
-                    cols_to_display.append('category')
-                cols_to_display.extend(['batch_no', 'Formatted Expiry', 'FEFO Status', 'qty_on_hand', 'qty_on_order', 'unit_cost'])
+                # Compute total quantity and total cost amount for the filtered list
+                total_filtered_qty = float(df_inv['qty_on_hand'].sum()) if 'qty_on_hand' in df_inv.columns else 0.0
+                total_filtered_amt = (
+                    float(df_inv['inventory_value'].sum())
+                    if 'inventory_value' in df_inv.columns
+                    else float((df_inv['qty_on_hand'] * df_inv.get('unit_cost', 0.0)).sum())
+                )
+
+                # Update the placeholder with selected rows count and total amount after filtering
+                with metric_selected_placeholder.container():
+                    col_m1, col_m2, col_m3 = st.columns(3)
+                    with col_m1:
+                        st.metric("selected rows : ", len(df_inv))
+                    with col_m2:
+                        st.metric("total stock qty : ", f"{total_filtered_qty:g} units")
+                    with col_m3:
+                        st.metric("total amount : ", f"₹{total_filtered_amt:,.2f}")
+
+                # Format DataFrame for display
+                cols_to_display = ['product_name', 'product_code', 'company', 'manufacturer', 'batch_no', 'Formatted Expiry', 'FEFO Status', 'qty_on_hand', 'qty_on_order', 'unit_cost', 'inventory_value']
                 cols_to_display = [c for c in cols_to_display if c in df_inv.columns]
 
                 df_display = df_inv[cols_to_display].rename(columns={
                     'product_name': 'Product Name',
-                    'category': 'Category',
-                    'batch_no': 'Batch No',
-                    'Formatted Expiry': 'Expiry Date',
+                    'product_code': 'Product Code',
+                    'company': 'Company',
+                    'manufacturer': 'Manufacturer',
+                    'batch_no': 'Batch(es)',
+                    'Formatted Expiry': 'Earliest Expiry',
                     'FEFO Status': 'FEFO Shelf-Life Status',
-                    'qty_on_hand': 'On Hand',
+                    'qty_on_hand': 'Current Stock',
                     'qty_on_order': 'On Order',
-                    'unit_cost': 'Cost Price (₹)'
+                    'unit_cost': 'Cost Price (₹)',
+                    'inventory_value': 'Total Value (₹)'
                 })
 
-                st.dataframe(df_display, use_container_width=True)
+                st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+                if len(df_inv) > 0:
+                    st.info(
+                        f"💰 **Total Amount for Selected List:** **₹{total_filtered_amt:,.2f}** "
+                        f"across **{len(df_inv)}** selected rows (Physical Stock: **{total_filtered_qty:g}** units)."
+                    )
+
+                col_inv_exp, _ = st.columns([1, 4])
+                with col_inv_exp:
+                    csv_inv = df_display.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download Inventory CSV",
+                        data=csv_inv,
+                        file_name="inventory_stock.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
             else:
                 st.info("No inventory batches in database yet. Please upload a MARG Excel file.")
         except Exception as e:
             st.error(f"Error fetching inventory: {e}")
+
+
+# ---------------------------------------------------------------------------
+# TAB: Promo Material (Excluded from Medical Proposals & Inventory)
+# ---------------------------------------------------------------------------
+with tab_promo:
+    st.subheader("🎁 Promotional Materials & Stationery")
+    st.markdown("""
+    Items where **both Manufacturer and Supplier were blank** in the uploaded stock Excel (e.g. promotional gifts, diaries, pens, bags, banners).
+    These items are **strictly isolated** from pharmaceutical inventory, replenishment forecasting, and procurement proposals.
+    """)
+
+    promo_items = []
+    if is_healthy:
+        try:
+            pr_res = requests.get(f"{BACKEND_URL}/promo-material", timeout=10)
+            if pr_res.status_code == 200:
+                promo_items = pr_res.json()
+        except Exception as e:
+            st.error(f"Error fetching promo materials: {e}")
+
+    if not promo_items:
+        st.info("No promotional material items detected in the current stock data.")
+    else:
+        total_promo_count = len(promo_items)
+        total_promo_qty = sum(p.get('qty_on_hand', 0) for p in promo_items)
+        total_promo_val = sum(p.get('total_value', 0) for p in promo_items)
+
+        col_pr1, col_pr2, col_pr3 = st.columns(3)
+        col_pr1.metric("Total Promo Items", total_promo_count)
+        col_pr2.metric("Total Physical Stock", f"{total_promo_qty:g} units")
+        col_pr3.metric("Total Stock Capital", f"₹{total_promo_val:,.2f}")
+
+        st.markdown("---")
+
+        # Filters
+        promo_companies = sorted(list({p.get('company') for p in promo_items if p.get('company') and p.get('company') != 'None'}))
+        promo_company_options = ["All Companies"] + promo_companies
+
+        col_pcomp, col_psrch = st.columns([1.5, 3])
+        with col_pcomp:
+            sel_promo_company = st.selectbox("🏢 Filter by Company", promo_company_options, key="promo_company_filter")
+        with col_psrch:
+            promo_search = st.text_input("🔍 Search Promo Material by Name or Item Code", "", key="promo_search").strip().lower()
+
+        filtered_promo = list(promo_items)
+        if sel_promo_company != "All Companies":
+            filtered_promo = [p for p in filtered_promo if p.get('company') == sel_promo_company]
+        if promo_search:
+            filtered_promo = [
+                p for p in filtered_promo
+                if promo_search in p.get('product_name', '').lower() or promo_search in p.get('product_code', '').lower()
+            ]
+
+        filtered_promo.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
+
+        st.info(f"Showing **{len(filtered_promo)}** of **{total_promo_count}** promo items.")
+
+        if filtered_promo:
+            df_promo = pd.DataFrame([
+                {
+                    'Product Name': p['product_name'],
+                    'Product Code': p['product_code'],
+                    'Company': p.get('company', 'General'),
+                    'Manufacturer': p.get('manufacturer', 'None (Promo)'),
+                    'Supplier': p.get('supplier_name', 'None (Promo)'),
+                    'Batch(es)': p.get('batch_no', 'DEFAULT'),
+                    'Current Stock': p['qty_on_hand'],
+                    'Cost Price (₹)': p['unit_cost'],
+                    'Total Value (₹)': p['total_value'],
+                    'Expiry Date': p.get('expiry_date', 'N/A'),
+                    'Unit': p.get('unit', 'pcs'),
+                }
+                for p in filtered_promo
+            ])
+
+            st.dataframe(df_promo, use_container_width=True, hide_index=True)
+
+            col_pr_exp, _ = st.columns([1, 4])
+            with col_pr_exp:
+                csv_promo = df_promo.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Promo Material CSV",
+                    data=csv_promo,
+                    file_name="promo_material_items.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
 
 
 # ---------------------------------------------------------------------------

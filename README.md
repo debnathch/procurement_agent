@@ -313,5 +313,9 @@ The Streamlit UI is organized into 4 stateful tabs with URL deep-linking (`st.qu
    - Active tab state is synchronized with `st.query_params["tab"]`.
    - Refreshing the browser or clicking action buttons (Approve/Reject) maintains the exact tab and company filter currently being inspected instead of resetting to the upload tab.
 
+## Changelog / Recent Updates
+- **Backend**: Fixed a `500 Internal Server Error` in the proposal approval flow by resolving a missing SQLAlchemy `select` import in `backend/app/services/feedback.py`.
+- **Frontend**: Fixed `StreamlitWidgetAlreadyInstantiatedError` by replacing direct `session_state` mutations on widget keys with `.pop()` in `frontend/streamlit_app.py`, enabling safe tab navigation during reruns.
+
 ## Do Not Commit
 `.env`, credentials, `.venv/`, `*.db`, real MARG export files

@@ -636,3 +636,11 @@ For teams standardizing on Docker deployments, `docker-compose.yml` provides a p
 * **Dual Port Mapping**: Exposes FastAPI on `:8000` (API & Swagger docs) and Streamlit on `:8501`.
 * **Container Healthcheck**: Automatic HTTP healthcheck querying `/health` at 30-second intervals with 15-second startup grace period.
 * **Configurable Defaults**: Environment variables pre-configured for dry-run safety (`EXECUTION_MODE=dry_run`, `REQUIRE_HUMAN_APPROVAL=true`, `DEFAULT_LEAD_TIME_DAYS=45`).
+
+---
+
+### 10. Revision History & Known Fixes
+
+* **v1.1 (Recent)**:
+  * Resolved a `500 Internal Server Error` during proposal decision submissions by fixing a missing SQLAlchemy `select` import in the `feedback.py` service.
+  * Corrected Streamlit session state tab persistence logic by unbinding `main_active_tab` widget keys using `.pop()` during reruns, avoiding `StreamlitWidgetAlreadyInstantiatedError` while maintaining stable URL-based deep linking.

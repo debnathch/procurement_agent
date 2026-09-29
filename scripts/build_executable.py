@@ -19,6 +19,11 @@ def build():
 
     print("[*] Preparing build environment...")
     
+    # Configure PyInstaller cache within workspace to avoid external sandbox permission restrictions
+    cache_dir = ROOT_DIR / "build" / "pyi_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["PYINSTALLER_CONFIG_DIR"] = str(cache_dir)
+
     # Locate streamlit static assets
     import streamlit
     streamlit_path = Path(streamlit.__file__).parent
@@ -34,6 +39,8 @@ def build():
         "--onedir",  # onedir is faster to start and more reliable for complex frameworks like Streamlit
         "--noconfirm",
         "--clean",
+        f"--workpath={build_dir}",
+        f"--distpath={dist_dir}",
         # Include application directories
         f"--add-data=backend{sep}backend",
         f"--add-data=frontend{sep}frontend",

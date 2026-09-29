@@ -75,7 +75,7 @@ class DemandService:
 
         # Fallback 0: Check sales history across canonical product name variants
         from backend.app.adapters.excel import pharma_canonical_key
-        prod = self.db.get(Product, product_code)
+        prod = self.db.scalars(select(Product).where(Product.product_code == product_code)).first()
         if prod:
             c_key = pharma_canonical_key(prod.product_name)
             all_prods = self.db.scalars(select(Product)).all()
@@ -100,7 +100,7 @@ class DemandService:
                     return round(avg_daily, 4), f'sales_history_{lookback_days}d'
 
         # Fallback 1: estimate daily demand from reorder_point / 30 if available
-        product = self.db.get(Product, product_code)
+        product = prod
         if product and product.reorder_point and product.reorder_point > 0:
             avg_daily = product.reorder_point / 30.0
             return round(avg_daily, 4), 'reorder_point_heuristic'

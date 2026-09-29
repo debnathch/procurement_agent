@@ -17,40 +17,9 @@ from backend.app.core.config import settings
 
 def is_ignored_item_name(name: str) -> bool:
     """
-    Checks if an item name contains blacklisted keywords for non-medicine or promotional materials.
-
-    Filters out packing boxes, promotional items, bags, visual aids, hardware, freight, etc.,
-    to keep procurement proposals restricted strictly to valid medicines.
+    Deprecated keyword check. Product-level is_promo_material flag is now used instead
+    to isolate promotional materials (items with blank supplier and manufacturer).
     """
-    if not name or not str(name).strip():
-        return True
-    s = str(name).strip().upper()
-    for kw in (
-        'DIARY', 'FREIGHT', 'PROJECT', 'FOIL', 'HDD', 'INSURANCE',
-        'JUTE BAG', 'PAPER-BAG', 'PLAT CHARGES', 'GIGABYTE', 'SHIRT',
-        'BOTTELE', 'CALENDER', 'CALENDAR', 'COMPUTER', 'FLASK',
-        'PACKING', 'PEN-', 'PILLOW', 'BAG-', 'BAG ',
-        'PRODUCT-CARD', 'VISUAL-AID', 'DIGITAL COLOR PRINT',
-        'LBL-', 'LABEL', 'CARTON', 'BANNER', 'LITERATURE'
-    ):
-        if kw in s:
-            return True
-
-    if re.search(r'\bCPU\b', s):
-        return True
-
-    if re.search(r'\bTONER\b', s) or 'INK-TONER' in s or s.startswith('TONER'):
-        return True
-
-    # Promotional wearable CAP / CAPS (e.g. 'STICKER- BENGAL PHARMA- CAP', 'PROMO CAP', 'CAP 2025')
-    is_pharma_capsule = (
-        re.search(r'\b\d+\s*[*xX]\s*\d+', s) or
-        any(w in s for w in ('CAPSULE', 'CAPSU', 'SOFTGEL', 'DSR', 'IT', 'MR', 'TAB', 'TABLET', 'BOLUS', 'MG', 'MCG', 'GM', 'ML'))
-    )
-    if not is_pharma_capsule:
-        if re.search(r'\bCAPS?\b', s) or s.startswith('CAP ') or s.startswith('CAPS ') or ' CAP ' in s or ' CAPS ' in s:
-            return True
-
     return False
 
 
@@ -128,10 +97,16 @@ class ProcurementAgent:
             stmt = stmt.where(Product.product_code.in_(product_codes))
         raw_products = self.db.scalars(stmt).all()
 
-        # 1. Filter out promotional items and discontinued/archived categories
+        from backend.app.adapters.excel import pharma_canonical_key, is_footer_or_junk_row
+
+        # 1. Filter out promotional items, junk service entries and discontinued/archived categories
         candidate_products = []
         for p in raw_products:
+            if getattr(p, 'is_promo_material', False):
+                continue
             if is_ignored_item_name(p.product_name):
+                continue
+            if is_footer_or_junk_row(p.product_name):   # blocks INVENTORY CHARGES, CYLINDER CHARGE etc.
                 continue
             cat = (p.category or '').strip().upper()
             if cat.startswith('ZZZZ') or any(w in cat for w in ('DISCONTINUED', 'OBSOLETE', 'DORMANT', 'ARCHIVE')):
@@ -147,20 +122,55 @@ class ProcurementAgent:
         proposals = []
 
         for pkey, variant_products in groups.items():
-            primary_product = self._select_primary_product(variant_products)
+            # Sort variant rows by expiry date descending (highest expiry date = last purchased batch)
+            def get_expiry_sort_key(p):
+                exp = getattr(p, 'expiry_date', None)
+                if exp:
+                    return (1, exp)
+                return (0, datetime.min)
+
+            sorted_by_expiry = sorted(variant_products, key=get_expiry_sort_key, reverse=True)
+            last_purchased_row = sorted_by_expiry[0]
+            primary_product = last_purchased_row
 
             # 1. Forecast daily demand (DemandService checks canonical variants)
             demand, demand_source = self.demand.forecast_daily(primary_product.product_code)
 
-            # 2. Compute current stock and FEFO expiry risk (InventoryService aggregates canonical variants)
+            # 2. Compute current stock and FEFO expiry risk across canonical variants
             inv = self.inventory.position(primary_product.product_code, demand)
 
-            # 3. Select vendor and resolve lead time
-            supplier = self.suppliers.choose(primary_product)
+            # 3. Default supplier information is the last purchased information (from highest expiry batch)
+            default_supplier_name = last_purchased_row.supplier_name
+            default_supplier_id = last_purchased_row.preferred_supplier_id
+
+            if not default_supplier_name:
+                for vp in sorted_by_expiry:
+                    if vp.supplier_name:
+                        default_supplier_name = vp.supplier_name
+                        default_supplier_id = vp.preferred_supplier_id
+                        break
+
+            supplier = None
+            if default_supplier_id:
+                supplier = self.db.get(Supplier, default_supplier_id)
+            if not supplier and default_supplier_name:
+                supplier = self.db.scalars(select(Supplier).where(Supplier.supplier_name == default_supplier_name)).first()
+            if not supplier:
+                supplier = self.suppliers.choose(primary_product)
+
             lead_time = lead_time_override or (
                 supplier.lead_time_days if supplier and supplier.lead_time_days else settings.default_lead_time_days
             )
-            unit_cost = primary_product.unit_cost or (inv['batches'][0].unit_cost if inv['batches'] else 0.0)
+
+            # Cost must show the last cost purchased (from highest expiry batch)
+            unit_cost = last_purchased_row.unit_cost or 0.0
+            if unit_cost <= 0:
+                for vp in sorted_by_expiry:
+                    if vp.unit_cost and vp.unit_cost > 0:
+                        unit_cost = vp.unit_cost
+                        break
+            if unit_cost <= 0 and inv['batches']:
+                unit_cost = inv['batches'][0].unit_cost
 
             # 4. Calculate policy-driven order quantity
             calc = self.policy.calculate(
@@ -176,14 +186,18 @@ class ProcurementAgent:
                 expiry_risk=inv['expiry_risk'],
             )
 
-            # Determine if this proposal represents a critical near-expiry alert
-            is_risk_alert = (calc['order_qty'] <= 0 and calc.get('expiry_action') in ('PAUSE_PROCUREMENT', 'REDUCE_ORDER'))
-            if calc['order_qty'] <= 0 and not is_risk_alert:
+            # High and near expiry risk products should not be proposed for reorder suggestions
+            has_expiry_risk = (
+                inv['near_expiry'] > 0 or
+                inv['expiry_risk'] > 0 or
+                calc.get('expiry_action') in ('PAUSE_PROCUREMENT', 'REDUCE_ORDER')
+            )
+            if has_expiry_risk or calc['order_qty'] <= 0:
                 continue
 
             # 5. Deterministic guardrail checks
             guard = self.guardrails.validate_proposal(
-                primary_product, supplier, calc['order_qty'], unit_cost, is_risk_alert=is_risk_alert
+                primary_product, supplier, calc['order_qty'], unit_cost, is_risk_alert=False
             )
             if not guard.allowed:
                 audit(
@@ -218,11 +232,19 @@ class ProcurementAgent:
             company = primary_product.company or (
                 variant_products[0].company if variant_products else None
             ) or 'General'
+            manufacturer = primary_product.manufacturer or (
+                variant_products[0].manufacturer if variant_products else None
+            )
+            batch_nos = [b.batch_no for b in inv.get('batches', []) if b.batch_no and b.batch_no != 'DEFAULT']
+            batch_str = ", ".join(dict.fromkeys(batch_nos)) if batch_nos else (inv.get('batches', [None])[0].batch_no if inv.get('batches') else None)
+
             proposal = ProcurementProposal(
                 run_id=run_id,
                 product_code=primary_product.product_code,
                 product_name=primary_product.product_name,
                 company=company,
+                manufacturer=manufacturer,
+                batch_numbers=batch_str,
                 supplier_id=supplier.supplier_id if supplier else None,
                 supplier_name=supplier.supplier_name if supplier else None,
                 recommended_qty=calc['order_qty'],
@@ -325,17 +347,22 @@ class ProcurementAgent:
         supplier_by_id = {s.supplier_id: s for s in active_suppliers}
         horizon = now + timedelta(days=settings.expiry_risk_horizon_days)
 
-        from backend.app.adapters.excel import pharma_canonical_key
+        from backend.app.adapters.excel import pharma_canonical_key, is_footer_or_junk_row
         from collections import defaultdict
 
         candidate_products = []
         for p in products:
+            if getattr(p, 'is_promo_material', False):
+                continue
             if is_ignored_item_name(p.product_name):
+                continue
+            if is_footer_or_junk_row(p.product_name):   # blocks INVENTORY CHARGES, CYLINDER CHARGE etc.
                 continue
             cat = (p.category or '').strip().upper()
             if cat.startswith('ZZZZ') or any(w in cat for w in ('DISCONTINUED', 'OBSOLETE', 'DORMANT', 'ARCHIVE')):
                 continue
             candidate_products.append(p)
+
 
         groups = defaultdict(list)
         for p in candidate_products:
@@ -345,7 +372,17 @@ class ProcurementAgent:
         results = []
 
         for pkey, variant_products in groups.items():
-            product = self._select_primary_product(variant_products)
+            # Sort variant rows by expiry date descending (highest expiry date = last purchased batch)
+            def get_expiry_sort_key(p):
+                exp = getattr(p, 'expiry_date', None)
+                if exp:
+                    return (1, exp)
+                return (0, datetime.min)
+
+            sorted_by_expiry = sorted(variant_products, key=get_expiry_sort_key, reverse=True)
+            last_purchased_row = sorted_by_expiry[0]
+            product = last_purchased_row
+
             # 1. Demand forecast
             p_code = product.product_code
             s_info = sales_map.get(p_code)
@@ -356,28 +393,55 @@ class ProcurementAgent:
                 demand = round(product.reorder_point / 30.0, 4)
                 demand_source = 'reorder_point_heuristic'
             else:
-                p_batches = batch_map.get(p_code, [])
-                on_h = sum(b.qty_on_hand for b in p_batches)
-                if on_h <= 0:
-                    demand = round(max(1.0, product.min_order_qty, product.pack_size) / 30.0, 4)
-                    demand_source = 'stockout_replenishment_baseline'
-                else:
-                    demand = 0.0
-                    demand_source = 'no_history'
+                # No sales history and no reorder_point.
+                # For no-reorder evaluation: treat as 0 demand so net_need = -stock <= 0
+                # (product has stock but no recorded sales — correctly shows as no-reorder needed)
+                demand = 0.0
+                demand_source = 'no_history'
 
             # 2. Inventory & FEFO position
             p_batches = batch_map.get(p_code, [])
             on_hand = sum(b.qty_on_hand for b in p_batches)
-            on_order = sum(b.qty_on_order for b in p_batches)
+            # Fallback: if no inventory_batches rows, use products.current_stock
+            if on_hand == 0 and (product.current_stock or 0) > 0:
+                on_hand = product.current_stock
+            on_order    = sum(b.qty_on_order for b in p_batches)
             near_expiry = sum(b.qty_on_hand for b in p_batches if b.expiry_date and now <= b.expiry_date <= horizon)
-            expired = sum(b.qty_on_hand for b in p_batches if b.expiry_date and b.expiry_date < now)
-            usable = max(0.0, on_hand - expired)
+            expired     = sum(b.qty_on_hand for b in p_batches if b.expiry_date and b.expiry_date < now)
+            usable      = max(0.0, on_hand - expired)
             expiry_risk = (near_expiry / on_hand) if on_hand > 0 else 0.0
 
-            # 3. Supplier & Lead time
-            supplier = supplier_by_id.get(product.preferred_supplier_id, default_supplier) if product.preferred_supplier_id else default_supplier
-            lead_time = lead_time_override or (supplier.lead_time_days if supplier and supplier.lead_time_days else settings.default_lead_time_days)
-            unit_cost = product.unit_cost or (p_batches[0].unit_cost if p_batches else 0.0)
+            # 3. unit_cost — walk all variant rows to find best non-zero purchase cost
+            unit_cost = last_purchased_row.unit_cost or 0.0
+            if unit_cost <= 0:
+                for vp in sorted_by_expiry:
+                    if vp.unit_cost and vp.unit_cost > 0:
+                        unit_cost = vp.unit_cost
+                        break
+            if unit_cost <= 0 and p_batches:
+                unit_cost = p_batches[0].unit_cost or 0.0
+
+            # 3. Default Supplier & Lead time (resolved from last purchased batch)
+            default_supplier_name = last_purchased_row.supplier_name
+            default_supplier_id = last_purchased_row.preferred_supplier_id
+            if not default_supplier_name:
+                for vp in sorted_by_expiry:
+                    if vp.supplier_name:
+                        default_supplier_name = vp.supplier_name
+                        default_supplier_id = vp.preferred_supplier_id
+                        break
+
+            supplier = None
+            if default_supplier_id:
+                supplier = supplier_by_id.get(default_supplier_id)
+            if not supplier and default_supplier_name:
+                supplier = next((s for s in active_suppliers if s.supplier_name == default_supplier_name), None)
+            if not supplier:
+                supplier = default_supplier
+
+            lead_time = lead_time_override or (
+                supplier.lead_time_days if supplier and supplier.lead_time_days else settings.default_lead_time_days
+            )
 
             # 4. Policy evaluation
             calc = self.policy.calculate(
@@ -393,15 +457,24 @@ class ProcurementAgent:
                 surplus_qty = round(-net_need, 2)
                 coverage_days = round(on_hand / demand, 1) if demand > 0 else 999.0
                 target_stock = calc.get('target_stock', 0.0)
+                batch_nos = [b.batch_no for b in p_batches if b.batch_no and b.batch_no != 'DEFAULT']
+                batch_str = ", ".join(dict.fromkeys(batch_nos)) if batch_nos else (p_batches[0].batch_no if p_batches else 'DEFAULT')
+
+                # Healthy stock capital = Available usable stock * purchase cost
+                healthy_stock_val = round(usable * unit_cost, 2)
+
                 results.append({
                     'product_code': product.product_code,
                     'product_name': product.product_name,
                     'category': product.category or 'General',
                     'company': product.company or 'General',
+                    'manufacturer': product.manufacturer or 'General',
+                    'batch_numbers': batch_str,
                     'unit': product.unit or 'strip',
                     'pack_size': product.pack_size or 1.0,
                     'unit_cost': round(unit_cost, 2),
                     'stock_on_hand': round(on_hand, 2),
+                    'available_stock': round(usable, 2),
                     'usable_before_expiry': round(usable, 2),
                     'stock_on_order': round(on_order, 2),
                     'near_expiry_qty': round(near_expiry, 2),
@@ -413,7 +486,8 @@ class ProcurementAgent:
                     'target_stock': round(target_stock, 2),
                     'net_need': round(net_need, 2),
                     'surplus_qty': surplus_qty,
-                    'inventory_value': round(on_hand * unit_cost, 2),
+                    'inventory_value': healthy_stock_val,
+                    'healthy_stock_value': healthy_stock_val,
                     'expiry_risk_score': round(expiry_risk, 4),
                     'expiry_action': calc.get('expiry_action', 'NORMAL'),
                     'supplier_name': supplier.supplier_name if supplier else 'Default Supplier',

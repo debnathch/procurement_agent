@@ -31,22 +31,26 @@ class Product(Base):
     """
     __tablename__ = 'products'
 
-    product_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_code: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     product_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    batch_no: Mapped[str | None] = mapped_column(String(64))
+    expiry_date: Mapped[datetime | None] = mapped_column(DateTime)
     category: Mapped[str | None] = mapped_column(String(128))
     company: Mapped[str | None] = mapped_column(String(256))
+    manufacturer: Mapped[str | None] = mapped_column(String(256))
+    is_promo_material: Mapped[bool] = mapped_column(Boolean, default=False)
     unit: Mapped[str] = mapped_column(String(32), default='units')
     pack_size: Mapped[float] = mapped_column(Float, default=1.0)
     min_order_qty: Mapped[float] = mapped_column(Float, default=1.0)
     unit_cost: Mapped[float | None] = mapped_column(Float)
+    current_stock: Mapped[float] = mapped_column(Float, default=0.0)
     reorder_point: Mapped[float] = mapped_column(Float, default=0.0)
     reorder_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    supplier_name: Mapped[str | None] = mapped_column(String(256))
     preferred_supplier_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    batches: Mapped[list['InventoryBatch']] = relationship(back_populates='product', cascade='all, delete-orphan')
-    sales: Mapped[list['SalesHistory']] = relationship(back_populates='product', cascade='all, delete-orphan')
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +89,10 @@ class InventoryBatch(Base):
     __tablename__ = 'inventory_batches'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    product_code: Mapped[str] = mapped_column(String(64), ForeignKey('products.product_code'), nullable=False)
+    product_code: Mapped[str] = mapped_column(String(64), nullable=False)
     batch_no: Mapped[str | None] = mapped_column(String(64))
     company: Mapped[str | None] = mapped_column(String(256))
+    manufacturer: Mapped[str | None] = mapped_column(String(256))
     qty_on_hand: Mapped[float] = mapped_column(Float, default=0.0)
     qty_on_order: Mapped[float] = mapped_column(Float, default=0.0)
     expiry_date: Mapped[datetime | None] = mapped_column(DateTime)
@@ -95,8 +100,6 @@ class InventoryBatch(Base):
     location: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    product: Mapped['Product'] = relationship(back_populates='batches')
 
     __table_args__ = (
         Index('ix_inventory_batches_product_code', 'product_code'),
@@ -115,13 +118,13 @@ class SalesHistory(Base):
     __tablename__ = 'sales_history'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    product_code: Mapped[str] = mapped_column(String(64), ForeignKey('products.product_code'), nullable=False)
+    product_code: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    product_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    """Raw product name from the MARG sales export — stored as-is for traceability."""
     sale_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     qty_sold: Mapped[float] = mapped_column(Float, default=0.0)
     channel: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-    product: Mapped['Product'] = relationship(back_populates='sales')
 
     __table_args__ = (
         Index('ix_sales_history_product_date', 'product_code', 'sale_date'),
@@ -162,6 +165,8 @@ class ProcurementProposal(Base):
     product_code: Mapped[str] = mapped_column(String(64), nullable=False)
     product_name: Mapped[str] = mapped_column(String(256), nullable=False)
     company: Mapped[str | None] = mapped_column(String(256))
+    manufacturer: Mapped[str | None] = mapped_column(String(256))
+    batch_numbers: Mapped[str | None] = mapped_column(String(512))
     supplier_id: Mapped[str | None] = mapped_column(String(64))
     supplier_name: Mapped[str | None] = mapped_column(String(256))
 

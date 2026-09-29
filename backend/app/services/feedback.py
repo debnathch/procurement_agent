@@ -10,6 +10,7 @@ Handles the Human-in-the-Loop review lifecycle:
 
 from datetime import datetime
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from backend.app.models.entities import ProcurementProposal, FeedbackEvent, Product, Supplier
 from backend.app.adapters.executor import build_executor
@@ -78,7 +79,7 @@ class ProposalService:
         if not proposal:
             raise ValueError(f"Proposal #{proposal_id} not found.")
 
-        product = self.db.get(Product, proposal.product_code)
+        product = self.db.scalars(select(Product).where(Product.product_code == proposal.product_code)).first()
         if not product:
             raise ValueError(f"Product '{proposal.product_code}' for proposal #{proposal_id} no longer exists.")
 
