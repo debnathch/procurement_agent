@@ -113,11 +113,39 @@ class DemandService:
             avg_daily = total_sold / elapsed_days
             return round(avg_daily, 4), source_suffix
 
-        # Fallback 0: Check sales history across canonical product name variants
+        # Fallback 0: Check sales history by product_name and canonical formulation variants
         from backend.app.adapters.excel import pharma_canonical_key
         prod = self.db.scalars(select(Product).where(Product.product_code == product_code)).first()
-        if prod:
+        if prod and prod.product_name:
+            clean_name = prod.product_name.strip().upper()
+            # 0a. Match by exact product_name in SalesHistory (e.g. when sales report lacks internal codes)
+            name_res = self.db.execute(
+                select(
+                    func.sum(SalesHistory.qty_sold).label('total_sold'),
+                    func.count(SalesHistory.sale_date.distinct()).label('days_with_sales'),
+                ).where(
+                    func.upper(SalesHistory.product_name) == clean_name,
+                    SalesHistory.sale_date >= cutoff,
+                )
+            ).one()
+            name_total = name_res.total_sold or 0.0
+            name_days = name_res.days_with_sales or 0
+            if name_total > 0 and name_days > 0:
+                avg_daily = name_total / elapsed_days
+                return round(avg_daily, 4), source_suffix
+
+            # 0b. Match by pharma_canonical_key across SalesHistory (canonical formulation fallback)
             c_key = pharma_canonical_key(prod.product_name)
+            all_sh = self.db.scalars(select(SalesHistory).where(SalesHistory.sale_date >= cutoff)).all()
+            matched_sh = [s for s in all_sh if s.product_name and pharma_canonical_key(s.product_name) == c_key]
+            if matched_sh:
+                c_total = sum(s.qty_sold for s in matched_sh)
+                c_days = len({s.sale_date for s in matched_sh if s.sale_date})
+                if c_total > 0 and c_days > 0:
+                    avg_daily = c_total / elapsed_days
+                    return round(avg_daily, 4), source_suffix
+
+            # 0c. Check across alternate product codes with same canonical formulation key
             all_prods = self.db.scalars(select(Product)).all()
             alt_codes = [
                 p.product_code for p in all_prods

@@ -269,14 +269,16 @@ $$D = \frac{\text{Total Quantity Sale}}{\text{Days from 1st April to Today}}$$
 Where:
 $$\text{Days from 1st April to Today} = \max(1, (\text{today} - \text{date}(\text{FY Year}, 4, 1)).\text{days})$$
 
-**Canonical Formulation Match:** If zero sales are recorded under the exact SKU code, sales of all equivalent pharmaceutical formulations sharing the same canonical active ingredient key are aggregated.
-
-**Heuristic Fallbacks:** If no sales history exists across the financial year:
-1. If a MARG Reorder Level ($RL > 0$) is configured, demand is estimated assuming a 30-day baseline consumption:
-   $$D = \frac{RL}{30}$$
-2. If the product is completely out of stock ($S_{\text{on\_hand}} \le 0$) with reorder enabled, a stockout replenishment baseline is provided to avoid perpetual stockouts:
-   $$D = \frac{\max(1.0, MOQ, P)}{30}$$
-3. Otherwise, $D = 0.0$ (`no_history`).
+**Sales Matching Hierarchy:**
+1. **Direct SKU Code Match**: Matches `SalesHistory.product_code == product_code` (for exports preserving ERP item codes).
+2. **Exact Product Name Match**: Matches `func.upper(SalesHistory.product_name) == clean_name` (ensuring sales reports exported without internal item codes match stock rows with 100% precision).
+3. **Canonical Formulation Key Match**: Matches across formulations sharing the same active ingredients and dosage form family using `pharma_canonical_key(product_name)` (capturing multi-pack variants like `10X1X10` vs `10X10`).
+4. **Heuristic Fallbacks**: If no sales history exists across the financial year:
+   a. If a MARG Reorder Level ($RL > 0$) is configured, demand is estimated assuming a 30-day baseline consumption:
+      $$D = \frac{RL}{30}$$
+   b. If the product is completely out of stock ($S_{\text{on\_hand}} \le 0$) with reorder enabled, a stockout replenishment baseline is provided:
+      $$D = \frac{\max(1.0, MOQ, P)}{30}$$
+   c. Otherwise, $D = 0.0$ (`no_history`).
 
 ---
 
@@ -735,7 +737,7 @@ For teams standardizing on Docker deployments, `docker-compose.yml` provides a p
   * **Database Parent Directory Auto-Creation**: `backend/app/core/database.py` ensures parent directory trees exist for SQLite database paths, preventing path initialization errors during isolated or custom deployments.
   * **Tab Cross-Contamination Prevention**: Products in a healthy state in the 'No Need for Reorder' tab are strictly excluded from appearing in the 'Inventory and FEFO' tab across backend (`/inventory?exclude_healthy=true`) and frontend UI, eliminating redundancy between covered healthy stock and at-risk stock requiring expiry action.
   * **Zero-Net-Need Tab Routing & Proposal Generation**: Formally partitioned replenishment state: products with strictly negative net need (`Net Need < 0`, indicating positive surplus stock) belong exclusively to the **No Need for Reorder** tab; products with `Net Need == 0` (stock at exact coverage threshold or zero stock buffer) and `Net Need > 0` are routed to **Review & Correct Suggestions** with baseline pack suggestions, allowing pharmacists full control to review, adjust quantities, and approve.
-  * **Daily Demand Velocity Overhaul (1st April Financial Year to Today)**: Replaced fixed 90-day lookback with exact financial year demand velocity: `Daily Demand Velocity = (Total Quantity Sale) / (Days from 1st April of current year to today)`. Aligned MARG sales summary ingestion to preserve true raw sales volume and dynamically recomputed replenishment target stock and net need.
+  * **Daily Demand Velocity Overhaul & Cross-Report Sales Resolution**: Replaced fixed 90-day lookback with exact financial year demand velocity: `Daily Demand Velocity = (Total Quantity Sale) / (Days from 1st April of current year to today)`. Aligned MARG sales summary ingestion to preserve true raw sales volume. Implemented multi-tier sales matching hierarchy (SKU code $\rightarrow$ exact product name $\rightarrow$ canonical formulation key) resolving discrepancies where MARG stock exports include internal item codes while sales exports list only trade names.
 
 * **v1.1**:
   * Resolved a `500 Internal Server Error` during proposal decision submissions by fixing a missing SQLAlchemy `select` import in the `feedback.py` service.

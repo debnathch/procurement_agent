@@ -330,13 +330,29 @@ class ProcurementAgent:
         sales_q = self.db.execute(
             select(
                 SalesHistory.product_code,
+                SalesHistory.product_name,
                 func.sum(SalesHistory.qty_sold),
                 func.count(SalesHistory.sale_date.distinct())
             )
             .where(SalesHistory.sale_date >= fy_cutoff)
-            .group_by(SalesHistory.product_code)
+            .group_by(SalesHistory.product_code, SalesHistory.product_name)
         ).all()
-        sales_map = {row[0]: (row[1] or 0.0, row[2] or 0) for row in sales_q}
+        sales_map = {}
+        sales_name_map = {}
+        sales_key_map = {}
+        for row in sales_q:
+            c, n, tot_sold, d_cnt = row[0], row[1], row[2] or 0.0, row[3] or 0
+            if c:
+                cur = sales_map.get(c, (0.0, 0))
+                sales_map[c] = (cur[0] + tot_sold, max(cur[1], d_cnt))
+            if n:
+                nu = n.strip().upper()
+                cur_n = sales_name_map.get(nu, (0.0, 0))
+                sales_name_map[nu] = (cur_n[0] + tot_sold, max(cur_n[1], d_cnt))
+                from backend.app.adapters.excel import pharma_canonical_key as _p_key
+                k = _p_key(n)
+                cur_k = sales_key_map.get(k, (0.0, 0))
+                sales_key_map[k] = (cur_k[0] + tot_sold, max(cur_k[1], d_cnt))
 
         # Batch 2: Pre-fetch all inventory batches in a single SQL query
         batches = self.db.scalars(select(InventoryBatch)).all()
@@ -390,6 +406,11 @@ class ProcurementAgent:
             # 1. Demand forecast
             p_code = product.product_code
             s_info = sales_map.get(p_code)
+            if (not s_info or s_info[0] <= 0) and product.product_name:
+                s_info = sales_name_map.get(product.product_name.strip().upper())
+            if (not s_info or s_info[0] <= 0) and product.product_name:
+                s_info = sales_key_map.get(pkey)
+
             if s_info and s_info[0] > 0 and s_info[1] > 0:
                 demand = round(s_info[0] / elapsed_days, 4)
                 demand_source = f'sales_since_1st_april_{fy_start.year} ({elapsed_days}d)'

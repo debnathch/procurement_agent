@@ -1082,4 +1082,16 @@ def test_daily_demand_velocity_since_first_april():
     assert calc['net_need'] == 100.0
     assert calc['order_qty'] == 100.0
 
+    # 4. Test demand matching when stock product_code and sales product_code differ (e.g. MARG stock code '0992' vs sales 'MED-39769')
+    p2 = Product(product_code='0992', product_name='GLOWVIT MV DROPS 30ML', reorder_enabled=True, pack_size=30.0, min_order_qty=1.0, unit_cost=10.81)
+    session.add(p2)
+    s2 = SalesHistory(product_code='MED-39769', product_name='GLOWVIT MV DROPS 30ML', qty_sold=2346.0, sale_date=datetime(2026, 8, 15))
+    session.add(s2)
+    session.commit()
+
+    vel2, src2 = demand_svc.forecast_daily('0992', as_of_date=as_of)
+    # 2346.0 / 184 = 12.75 units/day
+    assert vel2 == 12.75
+    assert 'sales_since_1st_april' in src2
+
     session.close()
