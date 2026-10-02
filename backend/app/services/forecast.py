@@ -10,10 +10,35 @@ Implements a 4-tier fallback hierarchy:
 """
 
 from __future__ import annotations
-from datetime import datetime, timedelta
+from datetime import datetime, date
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from backend.app.models.entities import SalesHistory, Product, InventoryBatch
+
+
+def get_days_from_fiscal_year_start(ref_date: datetime | date | None = None) -> tuple[int, date]:
+    """
+    Computes the number of elapsed days from 1st April of the current financial year to the reference date (today).
+
+    Formula:
+        Daily Demand Velocity = (Total Quantity Sale) / (Days from 1st April of current year to today)
+
+    - If today is on or after April 1st of year Y (e.g. Oct 2026): start is April 1, 2026.
+    - If today is before April 1st of year Y (e.g. Feb 2027): start is April 1, 2026.
+    - Minimum returned elapsed days is 1 (to prevent division by zero).
+
+    Returns:
+        tuple[int, date]: (elapsed_days, fiscal_year_start_date)
+    """
+    if ref_date is None:
+        ref_date = datetime.utcnow().date()
+    elif isinstance(ref_date, datetime):
+        ref_date = ref_date.date()
+
+    year = ref_date.year if ref_date.month >= 4 else ref_date.year - 1
+    fy_start = date(year, 4, 1)
+    elapsed_days = max(1, (ref_date - fy_start).days)
+    return elapsed_days, fy_start
 
 
 class DemandService:
@@ -30,15 +55,21 @@ class DemandService:
         """
         self.db: Session = db
 
-    def forecast_daily(self, product_code: str, lookback_days: int = 90) -> tuple[float, str]:
+    def forecast_daily(
+        self,
+        product_code: str,
+        as_of_date: datetime | date | None = None,
+        lookback_days: int | None = None
+    ) -> tuple[float, str]:
         """
-        Calculate the average daily sales velocity and source attribution for a product.
+        Calculate average daily sales velocity as:
+            Daily Demand Velocity = (Total Quantity Sale) / (Days from 1st April of current year to today)
 
         Evaluation Hierarchy:
         ---------------------
-        1. Query `SalesHistory` for `product_code` in the trailing `lookback_days` window.
+        1. Query `SalesHistory` for `product_code` from 1st April of the current financial year to today.
            If total units > 0 and days with sales > 0:
-           Velocity = Total_Sold / Lookback_Days, Source = 'sales_history_90d'.
+           Velocity = Total_Sold / Days_From_1st_April.
         2. If 0 sales, query sales across products with the same canonical medicine key
            (e.g., matching 'AC-BEN SP TABLET 10X10' and 'AC-BEN SP TABLET').
         3. If no sales history exists, derive from `product.reorder_point / 30.0`
@@ -49,12 +80,21 @@ class DemandService:
 
         Args:
             product_code (str): The unique canonical product code.
-            lookback_days (int): Historical sales lookback window (default: 90 days).
+            as_of_date (datetime | date | None): Optional evaluation reference date (default: today).
+            lookback_days (int | None): Optional override for lookback days if explicitly specified.
 
         Returns:
             tuple[float, str]: A tuple of (average_daily_demand, source_attribution_label).
         """
-        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+        if lookback_days is not None and lookback_days > 0:
+            elapsed_days = lookback_days
+            from datetime import timedelta
+            cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+            source_suffix = f'sales_history_{lookback_days}d'
+        else:
+            elapsed_days, fy_start = get_days_from_fiscal_year_start(as_of_date)
+            cutoff = datetime(fy_start.year, fy_start.month, fy_start.day)
+            source_suffix = f'sales_since_1st_april_{fy_start.year} ({elapsed_days}d)'
 
         result = self.db.execute(
             select(
@@ -70,8 +110,8 @@ class DemandService:
         days_with_sales = result.days_with_sales or 0
 
         if total_sold > 0 and days_with_sales > 0:
-            avg_daily = total_sold / lookback_days
-            return round(avg_daily, 4), f'sales_history_{lookback_days}d'
+            avg_daily = total_sold / elapsed_days
+            return round(avg_daily, 4), source_suffix
 
         # Fallback 0: Check sales history across canonical product name variants
         from backend.app.adapters.excel import pharma_canonical_key
@@ -96,8 +136,8 @@ class DemandService:
                 alt_total = alt_res.total_sold or 0.0
                 alt_days = alt_res.days_with_sales or 0
                 if alt_total > 0 and alt_days > 0:
-                    avg_daily = alt_total / lookback_days
-                    return round(avg_daily, 4), f'sales_history_{lookback_days}d'
+                    avg_daily = alt_total / elapsed_days
+                    return round(avg_daily, 4), source_suffix
 
         # Fallback 1: estimate daily demand from reorder_point / 30 if available
         product = prod

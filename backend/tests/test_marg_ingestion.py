@@ -1036,3 +1036,50 @@ def test_net_need_zero_and_negative_tab_isolation():
     assert 'MED-ZERO-STOCK' not in nr_codes
 
     session.close()
+
+
+def test_daily_demand_velocity_since_first_april():
+    from datetime import date
+    from backend.app.services.forecast import DemandService, get_days_from_fiscal_year_start
+    from backend.app.services.policy import ProcurementPolicy
+    from backend.app.models.entities import Product, SalesHistory
+
+    # 1. Test elapsed days function
+    # Test date: 2026-10-02 (Oct 2, 2026). April 1, 2026 to Oct 2, 2026 is exactly 184 days
+    days, fy_start = get_days_from_fiscal_year_start(date(2026, 10, 2))
+    assert fy_start == date(2026, 4, 1)
+    assert days == 184
+
+    # 2. Test DemandService daily demand velocity = total quantity sale / days from 1st April to today
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    p = Product(product_code='MED-VEL', product_name='Velocity Med', reorder_enabled=True, pack_size=10.0, min_order_qty=1.0, unit_cost=5.0)
+    session.add(p)
+    # Total sale: 368 units sold on 2026-08-01 (within FY starting 1st April 2026)
+    s = SalesHistory(product_code='MED-VEL', product_name='Velocity Med', qty_sold=368.0, sale_date=datetime(2026, 8, 1))
+    session.add(s)
+    session.commit()
+
+    demand_svc = DemandService(session)
+    as_of = date(2026, 10, 2)  # 184 days since 1st April 2026
+    vel, src = demand_svc.forecast_daily('MED-VEL', as_of_date=as_of)
+    # 368.0 / 184 = 2.0 units/day
+    assert vel == 2.0
+    assert 'sales_since_1st_april' in src
+
+    # 3. Test reorder calculation using this updated daily demand velocity
+    policy = ProcurementPolicy(review_days=7, safety_days=3, expiry_risk_horizon_days=90)
+    # Target stock = daily_velocity (2.0) * coverage (45 + 7 + 3 = 55 days) = 110.0 units
+    calc = policy.calculate(
+        avg_daily_demand=vel, lead_time_days=45, stock_on_hand=10.0, stock_on_order=0.0,
+        usable_before_expiry=10.0, near_expiry_qty=0.0, min_order_qty=1.0, pack_size=10.0,
+        unit_cost=5.0, expiry_risk=0.0
+    )
+    assert calc['target_stock'] == 110.0
+    # Net need = target_stock (110) - usable (10) = 100.0 units
+    assert calc['net_need'] == 100.0
+    assert calc['order_qty'] == 100.0
+
+    session.close()

@@ -946,27 +946,14 @@ class MargExcelParser:
 
             code = _make_stable_code(name)
 
-            # ONE row per product — no synthetic spreading.
-            # qty_sold is normalised to the DemandService lookback window (90 days)
-            # so that avg_daily = sum(qty_sold) / 90 returns the correct daily rate.
-            #
-            # Formula:
-            #   daily_rate       = total_sold / period_days
-            #   normalised_qty   = daily_rate × 90
-            #
-            # Example: 240 units sold over 176 days
-            #   daily_rate     = 240 / 176  = 1.363 units/day
-            #   normalised_qty = 1.363 × 90 = 122.7
-            #   DemandService  : 122.7 / 90 = 1.363 ✓
+            # ONE row per product with actual total units sold since 1st April
+            # Daily Demand Velocity = Total Quantity Sold / Days from 1st April of current year to today
             if total_sold > 0:
-                DEMAND_LOOKBACK = 90
-                daily_rate = total_sold / max(1.0, float(period_days))
-                normalised_qty = round(daily_rate * DEMAND_LOOKBACK, 4)
                 out['sales_history'].append({
                     'product_code': code,
                     'product_name': name,       # saved from ITEM DESCRIPTION column
                     'sale_date': end_date,      # single representative date (end of report period)
-                    'qty_sold': normalised_qty,
+                    'qty_sold': round(total_sold, 4),
                     'channel': 'retail',
                 })
 

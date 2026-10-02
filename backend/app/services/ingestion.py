@@ -168,8 +168,8 @@ class IngestionService:
                 )
             ).scalar() or 0.0
 
-            # Get demand velocity
-            avg_daily, _source = demand_svc.forecast_daily(p_code, lookback_days=90)
+            # Get demand velocity (Daily Demand Velocity = Total Sales / Days since 1st April)
+            avg_daily, _source = demand_svc.forecast_daily(p_code)
 
             if avg_daily <= 0:
                 continue

@@ -322,16 +322,18 @@ class ProcurementAgent:
         if not products:
             return []
 
-        # Batch 1: Pre-fetch 90-day sales history in a single SQL query
+        # Batch 1: Pre-fetch sales history from 1st April of current financial year in a single SQL query
+        from backend.app.services.forecast import get_days_from_fiscal_year_start
         now = datetime.utcnow()
-        cutoff = now - timedelta(days=90)
+        elapsed_days, fy_start = get_days_from_fiscal_year_start(now)
+        fy_cutoff = datetime(fy_start.year, fy_start.month, fy_start.day)
         sales_q = self.db.execute(
             select(
                 SalesHistory.product_code,
                 func.sum(SalesHistory.qty_sold),
                 func.count(SalesHistory.sale_date.distinct())
             )
-            .where(SalesHistory.sale_date >= cutoff)
+            .where(SalesHistory.sale_date >= fy_cutoff)
             .group_by(SalesHistory.product_code)
         ).all()
         sales_map = {row[0]: (row[1] or 0.0, row[2] or 0) for row in sales_q}
@@ -389,8 +391,8 @@ class ProcurementAgent:
             p_code = product.product_code
             s_info = sales_map.get(p_code)
             if s_info and s_info[0] > 0 and s_info[1] > 0:
-                demand = round(s_info[0] / 90.0, 4)
-                demand_source = 'sales_history_90d'
+                demand = round(s_info[0] / elapsed_days, 4)
+                demand_source = f'sales_since_1st_april_{fy_start.year} ({elapsed_days}d)'
             elif product.reorder_point and product.reorder_point > 0:
                 demand = round(product.reorder_point / 30.0, 4)
                 demand_source = 'reorder_point_heuristic'
