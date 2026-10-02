@@ -27,6 +27,7 @@ flowchart TD
         P1 --> IS[IngestionService]
         P2 --> IS
         IS --> DB[(SQLite Canonical Store)]
+        IS --> PROMO_STORE[(Promo Material Items)]
     end
 
     subgraph Agent Core Engine
@@ -41,11 +42,13 @@ flowchart TD
         GR --> PROPO[(ProcurementProposal Table)]
     end
 
-    subgraph Human Approval & Execution
+    subgraph Human Approval, Revert & Execution
         PROPO --> UI[Streamlit UI / FastAPI Docs]
+        PROMO_STORE --> UI
         UI --> PS[ProposalService]
         PS -->|Human Decision & Notes| FE[(FeedbackEvent / Audit)]
-        PS --> EX[Execution Factory build_executor]
+        PS -->|Approve & Dispatch| EX[Execution Factory build_executor]
+        PS -->|Unapprove / Revert| PROPO
         EX -->|dry_run| DR[DryRunExecutor]
         EX -->|csv| CSV[CsvExecutor -> outbox/]
         EX -->|marg| MHTTP[MargHttpExecutor -> MARG API]
@@ -62,7 +65,7 @@ The system is organized into modular tiers adhering to Clean Architecture princi
 procurement_agent/
 ├── .github/
 │   └── workflows/
-│       └── ci-cd.yml          # Automated CI/CD pipeline (Lint, Test, Multi-OS Binary Build, Release)
+│       └── ci-cd.yml          # Automated CI/CD pipeline (Lint, Test, Multi-OS Binary Build, Windows Pkg, Release)
 ├── backend/
 │   ├── app/
 │   │   ├── adapters/          # I/O boundaries (Excel parser, order executors, API source)
@@ -74,12 +77,12 @@ procurement_agent/
 │   │   │   └── procurement_agent.py
 │   │   ├── core/              # Global configuration & database engine
 │   │   │   ├── config.py      # Pydantic Settings loaded from .env
-│   │   │   └── database.py    # SQLAlchemy session factory & schema initialization
+│   │   │   └── database.py    # SQLAlchemy session factory, migrations & directory creation
 │   │   ├── models/            # Canonical domain entity models
 │   │   │   └── entities.py    # SQLAlchemy Declarative Models
 │   │   ├── services/          # Pure domain business logic & guardrails
 │   │   │   ├── audit.py       # Regulatory event logging
-│   │   │   ├── feedback.py    # Human review & PO dispatch service
+│   │   │   ├── feedback.py    # Human review, PO dispatch & unapprove service
 │   │   │   ├── forecast.py    # Sales history demand forecasting
 │   │   │   ├── guardrails.py  # Deterministic financial & pack safety rules
 │   │   │   ├── ingestion.py   # Upsert & transaction service for Excel data
@@ -90,21 +93,27 @@ procurement_agent/
 │   └── tests/                 # Unit & integration test suites
 │       └── test_marg_ingestion.py
 ├── frontend/
-│   └── streamlit_app.py       # Interactive Streamlit Human-in-the-Loop Web UI
+│   └── streamlit_app.py       # Interactive Streamlit Human-in-the-Loop Web UI (8 Tabs)
 ├── scripts/
 │   ├── generate_demo_data.py  # Synthetic pharmaceutical dataset seeder
-│   └── build_executable.py    # Standalone binary compilation script (PyInstaller)
+│   ├── build_executable.py    # Standalone binary compilation script (PyInstaller)
+│   └── package_windows.py     # Windows distribution package builder (win_run_pkg.zip)
 ├── Dockerfile                 # Multi-stage production container build (astral-sh/uv)
 ├── docker-compose.yml         # Container stack with persistent SQLite storage volume
 ├── .dockerignore              # Docker build exclusions
 ├── launcher.py                # Unified process orchestrator (FastAPI + Streamlit + health polling)
 ├── run_mac.command            # One-click desktop launcher for macOS (double-clickable)
-├── run_windows.bat            # One-click desktop launcher for Windows (double-clickable)
+├── run_windows.bat            # One-click desktop launcher for Windows (3-tier auto-installer)
+├── run_windows_isolated.bat   # Isolated runner for Windows environments
+├── package_windows.bat        # Convenience batch script to build win_run_pkg.zip
+├── win_run_pkg/               # Portable standalone Windows package directory
+├── WINDOWS_RUN_GUIDE.md       # Comprehensive Windows deployment & troubleshooting guide
 ├── pyproject.toml             # Modern Python project specification (PEP 621) & tool configurations
 ├── uv.lock                    # Deterministic cross-platform dependency lockfile
 ├── requirements.txt           # Legacy pip fallback specification
 └── .env
 ```
+
 
 ---
 
@@ -122,16 +131,23 @@ erDiagram
     ProcurementRun ||--o{ ProcurementProposal : "contains"
 
     Product {
-        string product_code PK
+        int id PK
+        string product_code
         string product_name
+        string batch_no
+        datetime expiry_date
         string category
         string company
+        string manufacturer
+        boolean is_promo_material
         string unit
         float pack_size
         float min_order_qty
         float unit_cost
+        float current_stock
         float reorder_point
         boolean reorder_enabled
+        string supplier_name
         string preferred_supplier_id
         datetime created_at
         datetime updated_at
@@ -155,6 +171,7 @@ erDiagram
         string product_code FK
         string batch_no
         string company
+        string manufacturer
         float qty_on_hand
         float qty_on_order
         datetime expiry_date
@@ -167,6 +184,7 @@ erDiagram
     SalesHistory {
         int id PK
         string product_code FK
+        string product_name
         datetime sale_date
         float qty_sold
         string channel
@@ -189,6 +207,8 @@ erDiagram
         string product_code FK
         string product_name
         string company
+        string manufacturer
+        string batch_numbers
         string supplier_id FK
         string supplier_name
         float recommended_qty
@@ -328,10 +348,12 @@ Pharmaceutical enterprise exports from MARG ERP 9+ typically contain non-standar
    - Any valid supplier extracted during sheet processing is deduplicated and upserted into the persistent `suppliers` table with default active status (`is_active = True`) and assigned lead times.
    - Ensures that all vendor records from uploaded spreadsheets immediately populate the live human-in-the-loop review dropdowns.
 
-4. **Non-Pharmaceutical Item Exclusion (`is_ignored_item_name`)**:
-   - Explicitly rejects non-pharmaceutical supplies and packaging materials matching:
-     $$\text{Ignored Substrings} \in \{\text{"PACKING"}, \text{"PEN-"}, \text{"PILLOW"}, \text{"BAG- "}\}$$
-   - Prevents promotional stationery, empty packing cartons, and non-inventory accessories from generating spurious reorder proposals or appearing in zero-reorder inventory lists.
+4. **Promotional Material Tagging & Isolation (`is_promotional_material`)**:
+   - Rather than discarding non-pharmaceutical items, the ingestion engine identifies promotional and packaging materials via:
+     1. Product name keywords: `['BAG', 'DIARY', 'SHIRT', 'CALENDER', 'CALENDAR', 'FOIL', 'BOX', 'PLAT CHARGES', 'PRODUCT', 'VISUAL-AID', 'PACKING', 'PEN-', 'PILLOW']`.
+     2. Rows where both manufacturer and supplier fields are blank in the source export.
+   - Identified records are ingested into the database with `is_promo_material = True`, `reorder_enabled = False`, and category `'Promo Material'`.
+   - Isolating promotional items ensures 100% auditability and inventory visibility via the dedicated **🎁 Promo Material** UI tab and `GET /promo-material` API, while completely preventing spurious reorder proposals, inaccurate demand velocities, or zero-reorder surplus contamination.
 
 ---
 
@@ -351,6 +373,10 @@ To support warehouse inventory audits without performance degradation or UI time
      $$\text{Net Need} = \text{Target Stock} - S_{\text{usable}} - S_{\text{on\_order}} \le 0$$
    - Orders all qualified products alphabetically by character (`product_name.asc()`).
    - Supports instant substring search filtering across product codes and descriptions.
+
+3. **Strict Tab Isolation between Covered Healthy Inventory and Inventory & FEFO**:
+   - Products qualifying for the 'No Need for Reorder' catalog must have healthy covered stock (`Net Need <= 0` and `expiry_action != 'PAUSE_PROCUREMENT'`). Items whose procurement was paused due to critical expiry risk are routed to the Inventory & FEFO tab.
+   - Any product that is in a healthy state in the 'No Need for Reorder' catalog is **strictly excluded from appearing in the 'Inventory and FEFO' tab** (`GET /inventory?exclude_healthy=true`). This guarantees zero cross-tab redundancy between covered healthy inventory and at-risk stock requiring expiry action.
 
 ---
 
@@ -448,7 +474,34 @@ sequenceDiagram
     UI-->>User: Shows confirmed status & enables CSV/PO export
 ```
 
-#### 5.3 Company Attribution & Multi-Tab Filter Workflow
+#### 5.3 Proposal Revert / Unapprove Workflow (Return to Review)
+
+To prevent erroneous purchase orders from proceeding without recourse, reviewers can remove items from **Tab 3: Approved Orders** and return them to **Tab 2: Review & Correct Suggestions**:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Human Reviewer
+    participant UI as Streamlit UI (Tab 3: Approved Orders)
+    participant API as FastAPI Backend (:8000)
+    participant Svc as ProposalService
+    participant DB as SQLite DB
+
+    User->>UI: Selects item(s) from "Remove Items from Approved Orders" or clicks "🗑️ Remove Item"
+    UI->>API: POST /proposals/{id}/unapprove (Payload: {action: 'unapprove', reason: '...', actor: 'human-reviewer'})
+    API->>Svc: decide(proposal_id, action="unapprove", reason, actor)
+    Svc->>DB: Fetch Proposal (verifies status in APPROVED_PENDING_EXECUTION, EXECUTED, REJECTED)
+    Svc->>DB: Reset proposal.status = 'PENDING', approved_qty = None, execution_reference = None
+    Svc->>DB: Insert FeedbackEvent(action='REVERT_TO_PENDING', reason='...')
+    Svc->>DB: Insert AuditEvent('PROPOSAL_REVERTED_TO_PENDING')
+    Svc-->>API: {"status": "PENDING", "message": "Proposal #id returned to PENDING review."}
+    API-->>UI: Success confirmation
+    UI->>UI: Refreshes view; item disappears from Approved Orders and reappears in Review Suggestions
+```
+
+---
+
+#### 5.4 Company Attribution & Multi-Tab Filter Workflow
 
 Pharmaceutical distributors organize catalogs and replenishment cycles primarily by manufacturing company (e.g. *Apex Pharma*, *Cipla Ltd*, *Sun Pharma*, *Dr Reddys*). The company dimension is ingested and propagated through all tiers:
 
@@ -479,18 +532,20 @@ flowchart TD
    - Warning empty-state placeholders display when no items match: `No rows found for company '{Company}' (0 rows displayed)`.
    - Dataframe summary tables and item cards feature dedicated Company columns and badges (`🏢 Company`).
 
-#### 5.4 Stateful Tab Persistence & URL Deep-Linking
+---
+
+#### 5.5 Stateful Tab Persistence & URL Deep-Linking
 
 To eliminate tab-resetting (where any button action or browser refresh defaulted the UI back to Tab 1), the presentation layer implements bidirectional state persistence:
 
 1. **Stateful `st.tabs`**:
-   - `st.tabs` is configured with `default=default_tab_label`, `key="main_active_tab"`, and `on_change=on_main_tab_changed`.
-   - Replaced dynamic tab label strings with clean, immutable tab identifiers, preventing Streamlit from destroying and recreating tab widgets on data updates.
+   - `st.tabs` is configured with `key="main_active_tab"` and `on_change=on_main_tab_changed`.
+   - Uses clean, immutable tab identifiers, preventing Streamlit from destroying and recreating tab widgets on data updates.
 2. **Bidirectional URL Query Parameter Sync (`st.query_params`)**:
-   - Mapped URL slugs (`upload`, `proposals`, `approved`, `no_reorder`, `inventory`, `audit`, `logs`) to tab containers.
-   - When a user refreshes the browser (`F5` or `Cmd+R`), the browser URL query parameter `?tab=<slug>` is read first to reconstruct the active tab.
-   - User actions triggering `st.rerun()` (such as *Refresh Data*, *Approve with Corrections*, *Reject*, *Reset Search*, *Show All Products*, and pagination) maintain the active tab without state loss.
-   - Direct tab-switching buttons (e.g. *👉 Go to Review & Correct Suggestions*) update `st.session_state["main_active_tab"]` and `st.query_params["tab"]` before dispatching `st.rerun()`.
+   - Mapped 8 URL slugs (`upload`, `proposals`, `approved`, `no_reorder`, `inventory`, `promo_material`, `audit`, `logs`) to their respective tab containers.
+   - When a user refreshes the browser (`F5` or `Cmd+R`), the browser URL query parameter `?tab=<slug>` is read first to reconstruct the active tab in `st.session_state["main_active_tab"]`.
+   - User actions triggering `st.rerun()` (such as *Refresh Data*, *Approve with Corrections*, *Reject*, *Remove Item*, *Reset Search*, *Show All Products*, and pagination) maintain the active tab without state loss.
+   - Direct tab-switching buttons update `st.session_state["main_active_tab"]` and `st.query_params["tab"]` before dispatching `st.rerun()`.
 
 ---
 
@@ -503,18 +558,23 @@ To eliminate tab-resetting (where any button action or browser refresh defaulted
 | `GET` | `/products/{code}` | Get single product by code | None | `ProductDict` |
 | `GET` | `/suppliers` | List all active vendors | None | `list[SupplierDict]` |
 | `GET` | `/inventory` | List all current batch positions, company & expiries | None | `list[InventoryBatchDict]` |
+| `GET` | `/promo-material` | List promotional and packaging supplies isolated from drug reorders | `?company=...&search=...` | `list[PromoMaterialDict]` |
 | `POST` | `/runs` | Trigger procurement agent execution | `{"product_codes": [], "lead_time_days": 45}` | `{"run_id": "...", "proposals": N}` |
 | `GET` | `/runs` | List historical agent execution runs | None | `list[RunDict]` |
 | `GET` | `/proposals` | Query generated proposals (status & company filtered) | `?status_filter=PENDING&company=Cipla+Ltd` | `list[ProposalDict]` |
 | `GET` | `/proposals/{id}` | Get single proposal details | None | `ProposalDict` |
 | `POST` | `/proposals/{id}/decide` | Approve/modify/reject a proposal | `{"action": "approve", "approved_qty": 100, ...}` | `{"status": "EXECUTED", "reference": "..."}` |
-| `POST` | `/proposals/batch-decide` | Batch approve or reject proposals | `{"action": "approve", "proposal_ids": [...]}` | `{"status": "success", "processed": N}` |
+| `POST` | `/proposals/{id}/unapprove` | Revert an approved/executed proposal back to PENDING review | `{"reason": "...", "actor": "human-reviewer"}` | `{"status": "PENDING", "message": "..."}` |
+| `POST` | `/proposals/batch-decide` | Batch approve, reject, or revert proposals | `{"action": "approve"\|"reject"\|"unapprove", "proposal_ids": [...]}` | `{"status": "success", "processed": N}` |
 | `GET` | `/procurement/no-reorder` | Products with Net Need <= 0 (fast pre-fetch, company filtered) | `?lead_time_days=45&search=...&company=...` | `list[NoReorderProductDict]` |
 | `POST` | `/ingestion/upload-marg-excel` | Multipart file upload for MARG Excel | `file: bytes, run_agent: bool, lead_time_days: int` | `{"stats": {...}, "proposals": [...]}` |
 | `GET` | `/ingestion/sample-template` | Download verified sample MARG Excel workbook | None | `application/vnd.openxmlformats` binary |
 | `POST` | `/system/reset-db` | Purge database records for fresh ingestion | None | `{"status": "success", "purged": {...}}` |
 | `GET` | `/system/logs` | Fetch live application runtime logs | `?lines=100` | `{"lines": [...], "total_lines": N}` |
 | `GET` | `/audit` | Retrieve regulatory audit event logs | `?limit=100` | `list[AuditEventDict]` |
+
+> [!NOTE]
+> **SQLite Database Directory Auto-Creation**: `backend/app/core/database.py` automatically checks and creates parent directory trees for custom SQLite database paths (e.g. `./data/procurement_agent.db`), eliminating startup failure risks in container or isolated directory setups.
 
 ---
 
@@ -576,10 +636,11 @@ sequenceDiagram
     participant QA as Quality Job (ruff)
     participant Test as Test Job (pytest & uv)
     participant Matrix as Multi-OS Build Matrix
+    participant WinPkg as Windows Package Job
     participant Docker as Container Verification
     participant Rel as GitHub Release
 
-    Dev->>GHA: Push commit or tag (v*.*.*)
+    Dev->>GHA: Push commit (main, DeepDrive, AIDeepDrive) or tag (v*.*.*)
     GHA->>QA: Execute ruff check
     QA-->>GHA: Code standards approved
     GHA->>Test: Run pytest suite under uv
@@ -589,16 +650,19 @@ sequenceDiagram
         GHA->>Matrix: Build Ubuntu Linux x86_64 Binary
         GHA->>Matrix: Build macOS Apple Silicon ARM64 Binary
         GHA->>Matrix: Build Windows x64 Binary
+    and Windows Run Package Generation
+        GHA->>WinPkg: Build win_run_pkg & win_run_pkg.zip (scripts/package_windows.py)
     and Container Build
         GHA->>Docker: Build Multi-Stage Dockerfile
     end
     
     Matrix-->>GHA: Upload Platform Artifacts (14-day retention)
+    WinPkg-->>GHA: Upload win_run_pkg Zip Artifact (30-day retention)
     Docker-->>GHA: Container verification successful
 
     opt Git Tag Trigger (e.g. v1.0.0)
         GHA->>Rel: Publish GitHub Release
-        Rel-->>Dev: Pre-compiled binaries available for download
+        Rel-->>Dev: Standalone Binaries & win_run_pkg.zip available for download
     end
 ```
 
@@ -609,24 +673,32 @@ sequenceDiagram
 | `build-executable` (Linux) | `ubuntu-latest` | `PyInstaller` | `procurement-agent-linux-x86_64.tar.gz` |
 | `build-executable` (macOS) | `macos-latest` | `PyInstaller` | `procurement-agent-macos-arm64.tar.gz` |
 | `build-executable` (Windows) | `windows-latest` | `PyInstaller` | `procurement-agent-windows-x64.zip` |
+| `build-win-pkg` | `ubuntu-latest` | `python scripts/package_windows.py` | `win_run_pkg.zip` |
 | `docker-build` | `ubuntu-latest` | `docker/setup-buildx-action@v3` | Verified Docker image cache |
-| `release` | `ubuntu-latest` | `softprops/action-gh-release@v2` | Official GitHub Release with assets |
+| `release` | `ubuntu-latest` | `softprops/action-gh-release@v2` | Official GitHub Release with executables & win_run_pkg.zip |
 
-#### 9.5 One-Click Native Desktop Launchers (`run_mac.command`, `run_windows.bat`)
+#### 9.5 One-Click Native Desktop Launchers & Windows Run Package
 
 To ensure non-technical warehouse supervisors and retail pharmacy operators can start the application without command-line setup:
+
 1. **macOS Launcher (`run_mac.command`)**:
    - Native double-clickable terminal script.
    - Automatically resolves working directory: `cd "$(dirname "$0")"`.
    - Probes runtime environment (evaluating `uv run`, virtual environment `.venv`, and system Python 3.10+).
    - Automatically installs required dependencies into `.venv` if missing.
-   - Launches `launcher.py`, which brings up FastAPI (:8000), checks health readiness, and pops the user's default browser directly into `http://localhost:8501`.
-2. **Windows Launcher (`run_windows.bat`)**:
+   - Launches `launcher.py`, which brings up FastAPI (:8000), checks health readiness, and opens `http://localhost:8501`.
+
+2. **Windows Launcher (`run_windows.bat`) — 3-Tier Zero-Config Strategy**:
    - Native double-clickable Windows command batch file.
-   - Sets project context using `%~dp0`.
-   - Checks for `uv` or Python launcher (`py -3` / `python`).
-   - Performs automated environment setup and dependency verification.
-   - Spawns the dual-process supervisor with automatic browser opening.
+   - **Strategy 1 (Astral uv)**: Detects `uv` in `PATH`, `%USERPROFILE%\.local\bin`, or `%USERPROFILE%\.cargo\bin`. If found, performs instant dependency synchronization (`uv sync`) and launches the app.
+   - **Strategy 2 (System Python / Windows Python Launcher)**: Detects Python 3.10+ via `python` or official Windows launcher `py -3`. Creates `.venv` and installs dependencies from `requirements.txt`.
+   - **Strategy 3 (Automated Zero-Config Non-Admin Bootstrap)**: If neither Python nor uv is installed, automatically downloads and configures lightweight `uv` via PowerShell (`irm https://astral.sh/uv/install.ps1 | iex`) without requiring administrator privileges, ensuring seamless zero-setup execution.
+
+3. **Portable Windows Run Package & Isolated Runner (`win_run_pkg`, `run_windows_isolated.bat`)**:
+   - Generated by `scripts/package_windows.py` (or `package_windows.bat`).
+   - Produces a self-contained portable distribution folder `win_run_pkg/` and compressed archive `win_run_pkg.zip`.
+   - Includes `run_isolated.bat` pre-configured to execute in an isolated runtime environment.
+   - Full setup and troubleshooting documentation provided in `WINDOWS_RUN_GUIDE.md`.
 
 #### 9.6 Multi-Container Orchestration (`docker-compose.yml`)
 
@@ -641,6 +713,15 @@ For teams standardizing on Docker deployments, `docker-compose.yml` provides a p
 
 ### 10. Revision History & Known Fixes
 
-* **v1.1 (Recent)**:
+* **v1.2 (Current)**:
+  * **Proposal Revert / Unapprove Workflow**: Added `POST /proposals/{proposal_id}/unapprove` and batch revert capability in `ProposalService`, allowing human reviewers to remove approved items from Tab 3 and automatically return them to Tab 2 for quantity corrections or re-evaluation, with full audit trail logging (`PROPOSAL_REVERTED_TO_PENDING`).
+  * **Promotional Material Ingestion & Segregation**: Implemented `is_promotional_material` detection for stationery, gift items, and non-medicine inventory (blank manufacturer & supplier). Added `is_promo_material` database flag, excluded promo items from procurement proposals and surplus calculations, and added dedicated Tab 6 (`🎁 Promo Material`) and `GET /promo-material` API endpoint.
+  * **3-Tier Zero-Config Windows Launcher**: Upgraded `run_windows.bat` with a 3-tier fallback strategy (uv $\rightarrow$ Python 3.10+ / `py -3` $\rightarrow$ non-admin PowerShell automated Astral uv bootstrap).
+  * **Windows Run Package & Deployment Guide**: Added `scripts/package_windows.py`, `package_windows.bat`, `run_windows_isolated.bat`, `win_run_pkg/`, and comprehensive `WINDOWS_RUN_GUIDE.md`.
+  * **CI/CD Pipeline Expansion**: Added `build-win-pkg` job in GitHub Actions workflow to generate and publish `win_run_pkg.zip` as an official release asset. Added `AIDeepDrive` branch CI triggers.
+  * **Database Parent Directory Auto-Creation**: `backend/app/core/database.py` ensures parent directory trees exist for SQLite database paths, preventing path initialization errors during isolated or custom deployments.
+  * **Tab Cross-Contamination Prevention**: Products in a healthy state in the 'No Need for Reorder' tab are strictly excluded from appearing in the 'Inventory and FEFO' tab across backend (`/inventory?exclude_healthy=true`) and frontend UI, eliminating redundancy between covered healthy stock and at-risk stock requiring expiry action.
+
+* **v1.1**:
   * Resolved a `500 Internal Server Error` during proposal decision submissions by fixing a missing SQLAlchemy `select` import in the `feedback.py` service.
   * Corrected Streamlit session state tab persistence logic by unbinding `main_active_tab` widget keys using `.pop()` during reruns, avoiding `StreamlitWidgetAlreadyInstantiatedError` while maintaining stable URL-based deep linking.

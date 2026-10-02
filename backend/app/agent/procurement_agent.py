@@ -97,7 +97,7 @@ class ProcurementAgent:
             stmt = stmt.where(Product.product_code.in_(product_codes))
         raw_products = self.db.scalars(stmt).all()
 
-        from backend.app.adapters.excel import pharma_canonical_key, is_footer_or_junk_row
+        from backend.app.adapters.excel import is_footer_or_junk_row
 
         # 1. Filter out promotional items, junk service entries and discontinued/archived categories
         candidate_products = []
@@ -453,7 +453,10 @@ class ProcurementAgent:
             )
 
             net_need = calc.get('net_need', calc['target_stock'] - usable - on_order)
-            if net_need <= 0:
+            expiry_action = calc.get('expiry_action', 'NORMAL')
+            # Products whose procurement is paused due to critical expiry risk belong in the Inventory & FEFO tab
+            # Only products that genuinely have covered stock in a healthy state belong in the No Need for Reorder catalog
+            if net_need <= 0 and expiry_action != 'PAUSE_PROCUREMENT':
                 surplus_qty = round(-net_need, 2)
                 coverage_days = round(on_hand / demand, 1) if demand > 0 else 999.0
                 target_stock = calc.get('target_stock', 0.0)

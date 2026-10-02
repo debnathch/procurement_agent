@@ -83,7 +83,43 @@ class ProposalService:
         if not product:
             raise ValueError(f"Product '{proposal.product_code}' for proposal #{proposal_id} no longer exists.")
 
-        # Step 2: Handle Rejection
+        # Step 2: Handle Revert / Unapprove (Remove from Approved Orders & move back to PENDING)
+        if action in ("unapprove", "revert", "move_to_pending"):
+            if proposal.status not in ("APPROVED_PENDING_EXECUTION", "EXECUTED", "REJECTED"):
+                raise ValueError(f"Cannot revert proposal in state '{proposal.status}'. Must be approved or rejected.")
+
+            prev_status = proposal.status
+            proposal.status = "PENDING"
+            proposal.approved_qty = None
+            proposal.execution_reference = None
+            proposal.approved_at = None
+            proposal.executed_at = None
+            proposal.human_reason = reason or "Removed from approved list and moved back to review by human reviewer."
+
+            # Record feedback event
+            self.db.add(FeedbackEvent(
+                proposal_id=proposal.id,
+                action="REVERT_TO_PENDING",
+                original_qty=proposal.recommended_qty,
+                final_qty=None,
+                reason=proposal.human_reason,
+                actor=actor,
+            ))
+
+            # Record immutable audit trail
+            audit(
+                self.db,
+                event_type="PROPOSAL_REVERTED_TO_PENDING",
+                actor=actor,
+                entity_type="proposal",
+                entity_id=str(proposal.id),
+                details={"previous_status": prev_status, "reason": proposal.human_reason},
+            )
+
+            self.db.commit()
+            return {"status": proposal.status, "reference": "", "message": f"Proposal #{proposal_id} returned to PENDING review."}
+
+        # Step 3: Handle Rejection
         if action == "reject":
             if proposal.status != "PENDING":
                 raise ValueError(f"Cannot reject proposal in state '{proposal.status}' (must be PENDING).")
@@ -114,9 +150,9 @@ class ProposalService:
             self.db.commit()
             return {"status": proposal.status, "reference": "", "message": "Proposal rejected."}
 
-        # Step 3: Handle Approval
+        # Step 4: Handle Approval
         if action != "approve":
-            raise ValueError(f"Unsupported decision action '{action}'. Supported actions: 'approve', 'reject'.")
+            raise ValueError(f"Unsupported decision action '{action}'. Supported actions: 'approve', 'reject', 'unapprove', 'revert'.")
 
         # Determine finalized quantity (defaulting to recommended quantity if none supplied)
         qty = float(approved_qty if approved_qty is not None else proposal.recommended_qty)

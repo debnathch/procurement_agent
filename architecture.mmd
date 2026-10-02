@@ -5,12 +5,14 @@ flowchart TD
     EXCEL --> HDR["Multi-Tier Header Resolution (Subheader Merging)"]
     HDR --> SAN["Supplier Name Sanitizer (Date-Prefix Stripping)"]
     HDR --> COMP["Company Column Ingestion & Auto-Migration"]
+    HDR --> PROMO_DETECT["Promo Material Tagging & Isolation (is_promo_material)"]
     SAN --> NORM
     COMP --> NORM
+    PROMO_DETECT --> NORM
     NORM --> V["Validation, Foreign Key & Quality Checks"]
     V --> DB[("SQLite Canonical Database Store")]
     V --> STK[("Stock Table: inventory_batches (Company & FEFO)")]
-    V --> PROD[("Products Table (Company & Master Spec)")]
+    V --> PROD[("Products Table (Company, Promo Flag & Master Spec)")]
     V --> SUPS[("Suppliers Table (Universal Upsert)")]
   end
 
@@ -31,14 +33,22 @@ flowchart TD
     G --> PROPO[("Proposals Store (Company Propagated)")]
     PROPO --> FASTAPI["FastAPI REST Backend (:8000)"]
     FASTAPI --> NOREORDER["No Need for Reorder API (/procurement/no-reorder?company=...)"]
+    FASTAPI --> INV_EP["Inventory & FEFO API (/inventory?exclude_healthy=true)"]
     FASTAPI --> PROPO_API["Proposals API (/proposals?company=...&status=...)"]
+    FASTAPI --> PROMO_EP["Promo Material API (/promo-material?company=...)"]
+    NOREORDER -.->|Exclude Healthy Items| INV_EP
     PROPO_API --> UI["Streamlit Web UI (:8501)"]
     NOREORDER --> UI
+    INV_EP --> UI
+    PROMO_EP --> UI
     SUPS --> UI
-    UI --> TABS["Stateful Tab Navigator & URL Deep-Linking (st.query_params)"]
+    UI --> TABS["Stateful 8-Tab Navigator & URL Deep-Linking (st.query_params)"]
     TABS --> FILT["Multi-Tab Company Filters & Live Row Count Showcases"]
-    FILT --> HUMAN["Human Review & Correction (Qty, Notes, Supplier Selectbox)"]
-    HUMAN --> EXEC["PO Execution Factory (build_executor)"]
+    FILT --> HUMAN["Human Review & Decision (Qty, Notes, Supplier Selectbox)"]
+    HUMAN -->|Approve / Modify| EXEC["PO Execution Factory (build_executor)"]
+    HUMAN -->|Unapprove / Revert| UNAPP["Revert to Pending Review (/proposals/{id}/unapprove)"]
+    UNAPP --> PROPO
+    UNAPP --> AUDIT
     EXEC -->|dry_run| DRY["Dry-Run Simulator"]
     EXEC -->|csv| CSV["CSV PO Export (outbox/)"]
     EXEC -->|marg| MREST["Live MARG REST API Dispatch"]
@@ -49,7 +59,7 @@ flowchart TD
   subgraph Packaging_CICD ["Packaging, Runtime & CI/CD Pipeline"]
     LAUNCHER["Unified Launcher (launcher.py)"] --> FASTAPI
     LAUNCHER --> UI
-    SCRIPTS["One-Click Double-Click Launchers (run_mac.command / run_windows.bat)"] --> LAUNCHER
+    SCRIPTS["One-Click Launchers (run_mac.command / run_windows.bat / run_windows_isolated.bat)"] --> LAUNCHER
     DCOMP["Docker Compose (docker-compose.yml)"] --> FASTAPI
     DCOMP --> UI
     PYINST["PyInstaller Compiler (scripts/build_executable.py)"] --> BIN["Standalone Executables (dist/procurement-agent)"]
@@ -57,8 +67,10 @@ flowchart TD
     GHA["GitHub Actions CI/CD (.github/workflows/ci-cd.yml)"] --> LINT["Quality & Lint (ruff)"]
     LINT --> TEST["Test Suite (pytest via uv)"]
     TEST --> BUILD_MAT["Multi-OS Binary Matrix (Linux/macOS/Win)"]
+    TEST --> WIN_PKG["Windows Run Package Builder (scripts/package_windows.py -> win_run_pkg.zip)"]
     TEST --> DOCK_TEST["Docker Build Verification"]
     BUILD_MAT --> REL["GitHub Releases on Tag (v*.*.*)"]
+    WIN_PKG --> REL
   end
 
-%% Revision: v1.1 (Recent) - Fixed Streamlit widget tab state bug (StreamlitWidgetAlreadyInstantiatedError) & missing SQLAlchemy import in backend.
+%% Revision: v1.2 - Added proposal revert/unapprove workflow, promotional material isolation tab & API, healthy no-reorder exclusion from Inventory & FEFO tab, zero-config Windows runner with PowerShell bootstrap, win_run_pkg packaging, and SQLite directory auto-creation.

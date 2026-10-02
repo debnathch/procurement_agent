@@ -3,6 +3,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from backend.app.core.config import settings
 
+# Ensure parent directory exists for SQLite files (e.g., ./data/procurement_agent.db)
+if settings.database_url.startswith("sqlite:///"):
+    raw_path = settings.database_url[len("sqlite:///"):]
+    if raw_path and not raw_path.startswith(":memory:"):
+        from pathlib import Path
+        Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
+
 engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False, "timeout": 60},  # required for SQLite + FastAPI

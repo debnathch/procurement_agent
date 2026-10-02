@@ -11,6 +11,7 @@ Features:
 - Live FEFO inventory monitor and audit compliance log
 """
 import io
+import time
 import requests
 import streamlit as st
 import pandas as pd
@@ -206,18 +207,16 @@ TAB_CONFIG = [
     ("logs", "📋 Live Rolling Logs"),
 ]
 TAB_SLUGS = [s for s, _ in TAB_CONFIG]
-TAB_LABELS = [l for _, l in TAB_CONFIG]
+TAB_LABELS = [tab_label for _, tab_label in TAB_CONFIG]
 SLUG_TO_LABEL = dict(TAB_CONFIG)
-LABEL_TO_SLUG = {l: s for s, l in TAB_CONFIG}
+LABEL_TO_SLUG = {tab_label: s for s, tab_label in TAB_CONFIG}
 
 # Persistent tab tracking: reads from URL query params (browser refresh) or session state
 active_slug = st.query_params.get("tab")
 if active_slug and active_slug in SLUG_TO_LABEL:
-    default_tab_label = SLUG_TO_LABEL[active_slug]
-elif "main_active_tab" in st.session_state and st.session_state["main_active_tab"] in TAB_LABELS:
-    default_tab_label = st.session_state["main_active_tab"]
-else:
-    default_tab_label = TAB_LABELS[0]
+    st.session_state["main_active_tab"] = SLUG_TO_LABEL[active_slug]
+elif "main_active_tab" not in st.session_state:
+    st.session_state["main_active_tab"] = TAB_LABELS[0]
 
 def on_main_tab_changed():
     selected = st.session_state.get("main_active_tab")
@@ -227,15 +226,9 @@ def on_main_tab_changed():
 # Main Tabs with full state persistence across reruns and page refreshes
 tab_upload, tab_proposals, tab_approved, tab_no_reorder, tab_inventory, tab_promo, tab_audit, tab_logs = st.tabs(
     TAB_LABELS,
-    default=default_tab_label,
     key="main_active_tab",
     on_change=on_main_tab_changed
 )
-
-# Keep query parameter in sync on initial render
-current_active_label = st.session_state.get("main_active_tab", default_tab_label)
-if current_active_label in LABEL_TO_SLUG and st.query_params.get("tab") != LABEL_TO_SLUG[current_active_label]:
-    st.query_params["tab"] = LABEL_TO_SLUG[current_active_label]
 
 
 # ---------------------------------------------------------------------------
@@ -711,49 +704,59 @@ with tab_proposals:
                         btn_label = f"✅ Approve with Corrections ({corrected_qty:g} units — ₹{calculated_val:,.2f})" if is_modified else f"✅ Approve as Recommended ({corrected_qty:g} units)"
                         if st.button(btn_label, key=f"btn_app_{p_id}", type="primary", use_container_width=True):
                             with st.spinner("Submitting approval..."):
-                                decide_res = requests.post(
-                                    f"{BACKEND_URL}/proposals/{p_id}/decide",
-                                    json={
-                                        "action": "approve",
-                                        "approved_qty": corrected_qty,
-                                        "supplier_id": corrected_supplier_id,
-                                        "reason": human_note,
-                                        "actor": "human-reviewer"
-                                    },
-                                    timeout=10
-                                )
-                                if decide_res.status_code == 200:
-                                    st.success(f"Proposal for {p['product_name']} successfully approved!")
-                                    st.session_state.pop("main_active_tab", None)
-                                    st.query_params["tab"] = "proposals"
-                                    st.rerun()
-                                else:
-                                    try:
-                                        err_msg = decide_res.json().get('detail', decide_res.text)
-                                    except Exception:
-                                        err_msg = decide_res.text
-                                    st.error(f"Approval blocked by guardrail: {err_msg}")
+                                try:
+                                    decide_res = requests.post(
+                                        f"{BACKEND_URL}/proposals/{p_id}/decide",
+                                        json={
+                                            "action": "approve",
+                                            "approved_qty": corrected_qty,
+                                            "supplier_id": corrected_supplier_id,
+                                            "reason": human_note,
+                                            "actor": "human-reviewer"
+                                        },
+                                        timeout=15
+                                    )
+                                    if decide_res.status_code == 200:
+                                        st.toast(f"✅ Proposal for {p['product_name']} successfully approved!", icon="🎉")
+                                        st.session_state["main_active_tab"] = SLUG_TO_LABEL.get("proposals", TAB_LABELS[1])
+                                        st.query_params["tab"] = "proposals"
+                                        time.sleep(0.3)
+                                        st.rerun()
+                                    else:
+                                        try:
+                                            err_msg = decide_res.json().get('detail', decide_res.text)
+                                        except Exception:
+                                            err_msg = decide_res.text
+                                        st.error(f"⚠️ Approval blocked by guardrail: {err_msg}")
+                                        st.toast(f"Approval blocked: {err_msg}", icon="⚠️")
+                                except Exception as exc:
+                                    st.error(f"❌ Failed to communicate with backend at {BACKEND_URL}: {exc}")
+                                    st.toast(f"Connection error: {exc}", icon="❌")
 
                     with col_btn2:
                         reject_note = st.text_input("Rejection Reason", "Not needed this cycle", key=f"rej_note_{p_id}")
                         if st.button("❌ Reject Proposal", key=f"btn_rej_{p_id}", use_container_width=True):
                             with st.spinner("Rejecting proposal..."):
-                                decide_res = requests.post(
-                                    f"{BACKEND_URL}/proposals/{p_id}/decide",
-                                    json={
-                                        "action": "reject",
-                                        "reason": reject_note,
-                                        "actor": "human-reviewer"
-                                    },
-                                    timeout=10
-                                )
-                                if decide_res.status_code == 200:
-                                    st.warning(f"Proposal {p_id} rejected.")
-                                    st.session_state.pop("main_active_tab", None)
-                                    st.query_params["tab"] = "proposals"
-                                    st.rerun()
-                                else:
-                                    st.error(f"Rejection error: {decide_res.text}")
+                                try:
+                                    decide_res = requests.post(
+                                        f"{BACKEND_URL}/proposals/{p_id}/decide",
+                                        json={
+                                            "action": "reject",
+                                            "reason": reject_note,
+                                            "actor": "human-reviewer"
+                                        },
+                                        timeout=15
+                                    )
+                                    if decide_res.status_code == 200:
+                                        st.toast(f"Proposal {p_id} rejected.", icon="🗑️")
+                                        st.session_state["main_active_tab"] = SLUG_TO_LABEL.get("proposals", TAB_LABELS[1])
+                                        st.query_params["tab"] = "proposals"
+                                        time.sleep(0.3)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Rejection error: {decide_res.text}")
+                                except Exception as exc:
+                                    st.error(f"❌ Failed to communicate with backend: {exc}")
 
                 else:
                     # Proposal already approved or rejected
@@ -828,6 +831,79 @@ with tab_approved:
                 mime="text/csv",
                 use_container_width=True
             )
+
+        st.markdown("---")
+        st.markdown("#### ↩️ Remove Items from Approved Orders")
+        st.caption(
+            "Removing an item deletes it from this finalized approved orders list and **automatically returns it back to the 'Review & Correct Suggestions' tab** for quantity adjustments or re-approval."
+        )
+
+        col_rem1, col_rem2 = st.columns([3, 1])
+        with col_rem1:
+            item_options = {
+                p['id']: f"[{p['product_code']}] {p['product_name']} — Approved: {p.get('approved_qty', 0):g} units (₹{((p.get('approved_qty') or 0) * (p.get('unit_cost') or 0)):,.2f}) | Supplier: {p.get('supplier_name', 'N/A')}"
+                for p in approved_proposals
+            }
+            selected_to_remove = st.multiselect(
+                "Select Approved Item(s) to Remove:",
+                options=list(item_options.keys()),
+                format_func=lambda x: item_options.get(x, str(x)),
+                placeholder="Choose one or more items to remove and return to review...",
+                key="select_approved_to_remove"
+            )
+        with col_rem2:
+            st.write("")
+            st.write("")
+            remove_btn_label = f"🗑️ Remove Selected ({len(selected_to_remove)})" if selected_to_remove else "🗑️ Remove Item"
+            if st.button(remove_btn_label, type="secondary", disabled=(len(selected_to_remove) == 0), use_container_width=True, key="btn_remove_approved_items"):
+                with st.spinner("Returning items to Review & Correct Suggestions..."):
+                    success_count = 0
+                    for pid in selected_to_remove:
+                        try:
+                            rev_res = requests.post(
+                                f"{BACKEND_URL}/proposals/{pid}/unapprove",
+                                json={"action": "unapprove", "reason": "Removed from approved list by reviewer", "actor": "human-reviewer"},
+                                timeout=10
+                            )
+                            if rev_res.status_code == 200:
+                                success_count += 1
+                        except Exception:
+                            pass
+                    if success_count > 0:
+                        st.success(f"✅ Successfully removed {success_count} item(s) from Approved Orders! They are now back in the 'Review & Correct Suggestions' tab.")
+                        st.rerun()
+                    else:
+                        st.error("Failed to remove selected items.")
+
+        # Expandable list of approved items with individual quick-removal buttons
+        with st.expander("📋 Individual Item Quick-Removal List (Click to expand)", expanded=False):
+            st.markdown("Remove any individual product from the approved list with one click:")
+            for p in approved_proposals:
+                row_c1, row_c2, row_c3 = st.columns([4, 2, 2])
+                with row_c1:
+                    st.write(f"**{p['product_name']}** (`{p['product_code']}`)")
+                    st.caption(f"Supplier: {p.get('supplier_name', 'N/A')} | Batch: `{p.get('batch_numbers', 'DEFAULT')}`")
+                with row_c2:
+                    val = (p.get('approved_qty') or 0) * (p.get('unit_cost') or 0)
+                    st.write(f"Approved: **{p.get('approved_qty', 0):g} units**")
+                    st.caption(f"Total: ₹{val:,.2f}")
+                with row_c3:
+                    if st.button("🗑️ Remove Item", key=f"quick_remove_p_{p['id']}", use_container_width=True, help="Remove this item and return it to Review & Correct Suggestions"):
+                        with st.spinner(f"Removing {p['product_name']}..."):
+                            try:
+                                rev_res = requests.post(
+                                    f"{BACKEND_URL}/proposals/{p['id']}/unapprove",
+                                    json={"action": "unapprove", "reason": "Removed from approved list by reviewer", "actor": "human-reviewer"},
+                                    timeout=10
+                                )
+                                if rev_res.status_code == 200:
+                                    st.success(f"✅ '{p['product_name']}' removed from Approved Orders and returned to Review & Correct Suggestions!")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Error removing item: {rev_res.text}")
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                st.divider()
 
 
 # ---------------------------------------------------------------------------
@@ -1099,8 +1175,33 @@ with tab_inventory:
                 else:
                     df_inv['FEFO Status'] = df_inv['expiry_date'].apply(calc_batch_fefo)
 
-                # Strictly isolate at-risk stock: exclude any Shelf-Life Healthy items from this tab
+                # Strictly isolate at-risk stock: exclude any Shelf-Life Healthy items or non-expiry entries from this tab
                 df_inv = df_inv[~df_inv['FEFO Status'].str.startswith("✅")]
+                df_inv = df_inv[~df_inv['FEFO Status'].isin(["Unknown / General", "Unknown"])]
+
+                # Mandatory Business Rule: Products in healthy state in "No Need for Reorder" tab
+                # MUST NOT show in the "Inventory and FEFO" tab
+                if 'no_reorder_items' not in locals() or not no_reorder_items:
+                    try:
+                        nr_fetch = requests.get(f"{BACKEND_URL}/procurement/no-reorder", timeout=10)
+                        if nr_fetch.status_code == 200:
+                            no_reorder_items = nr_fetch.json()
+                    except Exception:
+                        no_reorder_items = []
+
+                if no_reorder_items:
+                    healthy_nr_codes = {
+                        p.get('product_code') for p in no_reorder_items
+                        if p.get('expiry_action') != 'PAUSE_PROCUREMENT'
+                    }
+                    healthy_nr_names = {
+                        str(p.get('product_name', '')).strip().upper() for p in no_reorder_items
+                        if p.get('expiry_action') != 'PAUSE_PROCUREMENT'
+                    }
+                    df_inv = df_inv[
+                        ~df_inv['product_code'].isin(healthy_nr_codes) &
+                        ~df_inv['product_name'].astype(str).str.strip().str.upper().isin(healthy_nr_names)
+                    ]
 
                 # Format Expiry Date cleanly for display (YYYY-MM-DD or MM/YYYY)
                 def format_exp_date(exp_val):

@@ -907,5 +907,80 @@ def test_stable_code_deterministic_matching_between_stock_and_sales():
     session.close()
 
 
+def test_healthy_no_reorder_products_excluded_from_inventory_tab():
+    """
+    Validates the mandatory rule:
+    Products in healthy state in 'No Need for Reorder' tab must NOT show
+    in the 'Inventory and FEFO' tab.
+    """
+    from datetime import datetime, timedelta
+    from backend.app.agent.procurement_agent import ProcurementAgent
+    from backend.app.main import list_inventory
+    from backend.app.models.entities import Product, InventoryBatch
+
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    now = datetime.utcnow()
+
+    # Product A: Healthy stock covering demand -> belongs in No Need for Reorder
+    p_healthy = Product(
+        product_code='MED-HEALTHY',
+        product_name='HEALTHY MEDICINE 500MG',
+        category='Active Shelf-Life',
+        company='Apex Pharma',
+        unit_cost=50.0,
+        reorder_point=10.0,
+        reorder_enabled=True,
+    )
+    b_healthy = InventoryBatch(
+        product_code='MED-HEALTHY',
+        batch_no='BN-HEALTHY-01',
+        qty_on_hand=200.0,
+        expiry_date=now + timedelta(days=400),  # > 180d, healthy shelf life
+        unit_cost=50.0,
+    )
+
+    # Product B: At-risk product with expired / near-expiry stock
+    p_risk = Product(
+        product_code='MED-RISK',
+        product_name='EXPIRED MEDICINE 250MG',
+        category='Expired',
+        company='Apex Pharma',
+        unit_cost=30.0,
+        reorder_point=10.0,
+        reorder_enabled=True,
+    )
+    b_risk = InventoryBatch(
+        product_code='MED-RISK',
+        batch_no='BN-RISK-01',
+        qty_on_hand=50.0,
+        expiry_date=now - timedelta(days=10),   # Expired
+        unit_cost=30.0,
+    )
+
+    session.add_all([p_healthy, b_healthy, p_risk, b_risk])
+    session.commit()
+
+    agent = ProcurementAgent(session)
+    no_reorder = agent.get_no_reorder_products()
+    nr_codes = [x['product_code'] for x in no_reorder]
+
+    # Verify healthy product is in No Need for Reorder
+    assert 'MED-HEALTHY' in nr_codes
+
+    # Call list_inventory with exclude_healthy=True (Inventory & FEFO tab view)
+    inv_items = list_inventory(exclude_healthy=True, db=session)
+    inv_codes = [x['product_code'] for x in inv_items]
+
+    # Crucial assertion: MED-HEALTHY MUST NOT be in Inventory & FEFO
+    assert 'MED-HEALTHY' not in inv_codes
+    # At-risk product MED-RISK MUST be in Inventory & FEFO
+    assert 'MED-RISK' in inv_codes
+
+    session.close()
+
+
 
 

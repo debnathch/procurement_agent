@@ -21,7 +21,7 @@ from backend.app.models.entities import (
     ProcurementProposal, ProcurementRun, Product, Supplier,
     InventoryBatch, SalesHistory, AuditEvent, FeedbackEvent,
 )
-from backend.app.agent.procurement_agent import ProcurementAgent
+from backend.app.agent.procurement_agent import ProcurementAgent, is_ignored_item_name
 from backend.app.services.feedback import ProposalService
 from backend.app.services.ingestion import IngestionService
 from backend.app.adapters.excel import create_sample_marg_excel
@@ -352,17 +352,23 @@ def decide_proposal(proposal_id: int, req: DecisionRequest, db: Session = Depend
 
 
 class BatchDecisionRequest(BaseModel):
-    action: str = 'approve'                        # 'approve' | 'reject'
-    proposal_ids: Optional[list[int]] = None      # None means all pending proposals
+    action: str = 'approve'                        # 'approve' | 'reject' | 'unapprove' | 'revert'
+    proposal_ids: Optional[list[int]] = None      # None means all relevant proposals
     reason: Optional[str] = None
     actor: str = 'human-ui'
 
 
 @app.post('/proposals/batch-decide', tags=['proposals'])
 def batch_decide_proposals(req: BatchDecisionRequest, db: Session = Depends(get_db)):
-    """Batch approve or reject proposals."""
+    """Batch approve, reject, or revert proposals."""
     svc = ProposalService(db)
-    stmt = select(ProcurementProposal).where(ProcurementProposal.status == 'PENDING')
+    if req.action in ('unapprove', 'revert'):
+        stmt = select(ProcurementProposal).where(
+            ProcurementProposal.status.in_(['APPROVED_PENDING_EXECUTION', 'EXECUTED'])
+        )
+    else:
+        stmt = select(ProcurementProposal).where(ProcurementProposal.status == 'PENDING')
+
     if req.proposal_ids:
         stmt = stmt.where(ProcurementProposal.id.in_(req.proposal_ids))
     proposals = db.scalars(stmt).all()
@@ -388,6 +394,28 @@ def batch_decide_proposals(req: BatchDecisionRequest, db: Session = Depends(get_
         "total_attempted": len(proposals),
         "errors": errors[:10],
     }
+
+
+@app.post('/proposals/{proposal_id}/unapprove', tags=['proposals'])
+def unapprove_proposal(
+    proposal_id: int,
+    req: Optional[DecisionRequest] = None,
+    db: Session = Depends(get_db)
+):
+    """Reverts an approved proposal back to PENDING review."""
+    svc = ProposalService(db)
+    reason = req.reason if req and req.reason else "Removed from approved list by reviewer."
+    actor = req.actor if req and req.actor else "human-ui"
+    try:
+        result = svc.decide(
+            proposal_id=proposal_id,
+            action="unapprove",
+            reason=reason,
+            actor=actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -478,14 +506,36 @@ def list_inventory(
     else:
         target_batches = [b for b in all_batches if b.product_code in prod_map]
 
+    healthy_no_reorder_codes = set()
+    healthy_no_reorder_names = set()
+    if exclude_healthy:
+        try:
+            agent = ProcurementAgent(db)
+            no_reorder_items = agent.get_no_reorder_products()
+            healthy_no_reorder_codes = {
+                p['product_code'] for p in no_reorder_items
+                if p.get('expiry_action') != 'PAUSE_PROCUREMENT'
+            }
+            healthy_no_reorder_names = {
+                str(p.get('product_name', '')).strip().upper() for p in no_reorder_items
+                if p.get('expiry_action') != 'PAUSE_PROCUREMENT'
+            }
+        except Exception as e:
+            logger.warning(f"Could not calculate no-reorder exclusions for inventory: {e}")
+
     # Group by (product_name, fefo_category)
     groups = defaultdict(list)
     for b in target_batches:
         p = prod_map.get(b.product_code)
         pname = p.product_name if p else b.product_code
         cat = get_fefo_category(b.expiry_date)
-        if exclude_healthy and cat.startswith('✅'):
-            continue
+        if exclude_healthy:
+            if cat.startswith('✅') or cat == 'Unknown / General':
+                continue
+            if b.product_code in healthy_no_reorder_codes or pname.strip().upper() in healthy_no_reorder_names:
+                continue
+            if is_ignored_item_name(pname):
+                continue
         groups[(pname, cat)].append((p, b))
 
     results = []

@@ -544,14 +544,15 @@ def parse_expiry_date(val: Any) -> datetime | None:
 
 
 PROMO_NAME_KEYWORDS: tuple[str, ...] = (
-    'BAG', 'DIARY', 'SHIRT', 'CALENDER', 'CALENDAR', 'FOIL', 'BOX', 'PLAT CHARGES', 'PRODUCT', 'VISUAL-AID', 'PACKING'
+    'BAG', 'DIARY', 'SHIRT', 'CALENDER', 'CALENDAR', 'FOIL', 'BOX', 'PLAT CHARGES', 'PRODUCT',
+    'VISUAL-AID', 'PACKING', 'PEN-', 'PILLOW', 'PAD-', 'BANNER', 'STANDY', 'PAPER WEIGHT', 'CARTON'
 )
 
 
 def is_promotional_material(name: str, has_mfr: bool = False, has_sup: bool = False) -> bool:
     """
     Determines if an item is promotional/packaging material:
-    1. Product name contains promotional keywords: BAG, DIARY, SHIRT, CALENDER, CALENDAR, FOIL, BOX, PLAT CHARGES, PRODUCT, VISUAL-AID, PACKING.
+    1. Product name contains promotional keywords: BAG, DIARY, SHIRT, CALENDER, CALENDAR, FOIL, BOX, PLAT CHARGES, PRODUCT, VISUAL-AID, PACKING, PEN-, PILLOW, PAD-, BANNER, STANDY, PAPER WEIGHT, CARTON.
     2. Both manufacturer and supplier columns are blank in the input row.
     """
     name_upper = (name or '').upper()

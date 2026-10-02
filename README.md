@@ -169,7 +169,7 @@ $$\mathbf{Recommended\; Qty} = \mathbf{0\; units}\; \implies \text{Procurement p
 Double-click to automatically set up the environment, install dependencies, and launch the application:
 
 * **macOS**: Double-click [`run_mac.command`](run_mac.command) in Finder.
-* **Windows**: Double-click [`run_windows.bat`](run_windows.bat) in File Explorer.
+* **Windows**: Double-click [`run_windows.bat`](run_windows.bat) in File Explorer (see [Windows Run Guide](WINDOWS_RUN_GUIDE.md)).
 
 ---
 
@@ -287,35 +287,58 @@ MARG ERP Excel
 
 ## 🖥️ UI Structure & Interactive Workflows
 
-The Streamlit UI is organized into 4 stateful tabs with URL deep-linking (`st.query_params`), ensuring the user's active tab is preserved across browser refreshes and action re-renders:
+The Streamlit UI is organized into 8 stateful tabs with URL deep-linking (`st.query_params`), ensuring the user's active tab is preserved across browser refreshes and action re-renders:
 
-1. **Tab 1: 📁 Upload MARG Excel and Run**
+1. **Tab 1: 📂 Upload MARG Excel & Run**
    - Upload closing stock, sales summary, and supplier master files.
    - Automatically parses company attribution, detects date formats (`DD-MM-YYYY` / `MM/DD/YYYY`), and updates database schemas.
    - Triggers the procurement calculation pipeline with configurable lead time, buffer days, and execution modes.
 
-2. **Tab 2: 📋 Review and Correct Suggestions**
+2. **Tab 2: 💡 Review & Correct Suggestions**
    - Displays all generated replenishment proposals with net need > 0.
    - **Company Filter Dropdown**: Filter proposals by pharmaceutical manufacturing company or view `All Companies`.
    - **Live Row Count Metrics**: Shows `Showing X of Y proposals` dynamically in metrics cards, tab headers, and table placeholders.
    - In-place editing of proposed quantities, supplier selection, and bulk/single Approve/Reject controls.
 
-3. **Tab 3: ✅ Approved Orders**
+3. **Tab 3: 📦 Approved Orders / PO Export**
    - Central repository of all human-approved proposals.
    - One-click CSV export ready for email dispatch or MARG ERP purchase order import.
+   - **↩️ Remove Items from Approved Orders**: Select one or more items (or click individual 🗑️ buttons) to unapprove them and return them back to Tab 2 (*Review & Correct Suggestions*) for quantity adjustments or re-approval.
 
-4. **Tab 4: 📦 No Need for Reorder**
+4. **Tab 4: 🛡️ No Need for Reorder**
    - Real-time catalog of products with zero or negative net need (sufficient stock on hand or high expiry pause).
    - **Company Filter Dropdown**: Filter surplus stock items by manufacturer with live row count badges (`Showing X of Y items`).
    - Detailed visibility into available usable stock, target stock, daily demand velocity, and surplus quantities.
 
-5. **Stateful Navigation & URL Deep-Linking**
+5. **Tab 5: 📊 Inventory & FEFO Expiry**
+   - Master catalog of all inventory batches with pharmaceutical expiry dates.
+   - Categorized by lifecycle status (*Active Shelf-Life*, *Near-Expiry*, *Expired / Phased Out*).
+   - Real-time stock valuation and batch inspection.
+
+6. **Tab 6: 🎁 Promo Material**
+   - Dedicated repository of promotional, packaging, and non-medicine inventory (stationery, bags, gifts, empty packing boxes).
+   - Isolated from procurement replenishment calculations to prevent spurious reorders and inaccurate sales velocity forecasting.
+
+7. **Tab 7: 📜 Compliance Audit Log**
+   - Immutable audit trail capturing every operational event: Excel file ingestions, proposal approvals, quantity corrections, rejections, proposal reverts, and purchase order dispatches.
+
+8. **Tab 8: 📋 Live Rolling Logs**
+   - Real-time streaming log console displaying backend and agent events for live monitoring and diagnostics.
+
+9. **Stateful Navigation & URL Deep-Linking**
    - Active tab state is synchronized with `st.query_params["tab"]`.
-   - Refreshing the browser or clicking action buttons (Approve/Reject) maintains the exact tab and company filter currently being inspected instead of resetting to the upload tab.
+   - Refreshing the browser or clicking action buttons (Approve/Reject/Remove) maintains the exact tab and company filter currently being inspected instead of resetting to the upload tab.
 
 ## Changelog / Recent Updates
-- **Backend**: Fixed a `500 Internal Server Error` in the proposal approval flow by resolving a missing SQLAlchemy `select` import in `backend/app/services/feedback.py`.
-- **Frontend**: Fixed `StreamlitWidgetAlreadyInstantiatedError` by replacing direct `session_state` mutations on widget keys with `.pop()` in `frontend/streamlit_app.py`, enabling safe tab navigation during reruns.
+- **v1.2**:
+  - **Item Revert / Unapprove**: Added ability to remove items from Tab 3 (Approved Orders) and return them to Tab 2 (Review Suggestions) via `POST /proposals/{id}/unapprove` and batch revert.
+  - **Promo Material Isolation**: Integrated `is_promotional_material` detection and created dedicated Tab 6 and `/promo-material` API endpoint.
+  - **Zero-Config Windows Launcher**: Enhanced `run_windows.bat` with 3-tier fallback (uv → Python 3.10+ → non-admin PowerShell automated setup) and created `win_run_pkg.zip` distribution package.
+  - **CI/CD Automation**: GitHub Actions now builds `win_run_pkg.zip` and attaches it to GitHub releases.
+  - **SQLite Directory Creation**: Ensured automatic directory creation for SQLite database paths in `database.py`.
+- **v1.1**:
+  - **Backend**: Fixed a `500 Internal Server Error` in the proposal approval flow by resolving a missing SQLAlchemy `select` import in `backend/app/services/feedback.py`.
+  - **Frontend**: Fixed `StreamlitWidgetAlreadyInstantiatedError` by replacing direct `session_state` mutations on widget keys with `.pop()` in `frontend/streamlit_app.py`, enabling safe tab navigation during reruns.
 
 ## Do Not Commit
 `.env`, credentials, `.venv/`, `*.db`, real MARG export files

@@ -34,6 +34,12 @@ ENV/
 *.db
 *.sqlite3
 procurement_agent.db
+*.db-shm
+*.db-wal
+data/
+inbox/
+win_run_pkg/
+win_run_pkg.zip
 
 # Output & Generated Order Exports
 outbox/
