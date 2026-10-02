@@ -907,10 +907,10 @@ with tab_approved:
 
 
 # ---------------------------------------------------------------------------
-# TAB: No Need for Reorder (Net Need <= 0)
+# TAB: No Need for Reorder (Net Need < 0)
 # ---------------------------------------------------------------------------
 with tab_no_reorder:
-    st.subheader("🛡️ Products with No Need for Reorder (Net Need ≤ 0)")
+    st.subheader("🛡️ Products with No Need for Reorder (Net Need < 0)")
     st.markdown("""
     These pharmaceutical products currently have **sufficient usable stock on hand and pending orders** to cover forecasted customer demand across the entire delivery lead time, review cycle, and safety buffer.
     """)
@@ -1036,19 +1036,19 @@ with tab_no_reorder:
     # Showcase number of rows in tab as well as placeholder
     if selected_nr_company != "All Companies" or selected_nr_mfr != "All Manufacturers" or search_kw:
         st.info(
-            f"📋 **Showing {len(display_items)} row(s)** with Net Need ≤ 0 "
+            f"📋 **Showing {len(display_items)} row(s)** with Net Need < 0 "
             f"(Filtered by Company: **{selected_nr_company}** | Manufacturer: **{selected_nr_mfr}**"
             + (f" | Keyword: `'{search_kw}'`" if search_kw else "")
             + f" | Out of **{total_no_reorder_count}** total products)."
         )
     else:
-        st.info(f"📋 **Total List Count**: Showing all **{total_no_reorder_count}** products with Net Need ≤ 0 in alphabetical order (A–Z). No reorder needed.")
+        st.info(f"📋 **Total List Count**: Showing all **{total_no_reorder_count}** products with Net Need < 0 in alphabetical order (A–Z). No reorder needed.")
 
     if not display_items:
         if selected_nr_company != "All Companies" or selected_nr_mfr != "All Manufacturers" or search_kw:
             st.warning(f"No products found for company '{selected_nr_company}' and manufacturer '{selected_nr_mfr}'" + (f" matching '{search_kw}'" if search_kw else "") + " (0 rows displayed). Try different filters or click 'Show All Products'.")
         else:
-            st.info("No products currently have Net Need ≤ 0. Run the procurement agent after uploading stock and sales data.")
+            st.info("No products currently have Net Need < 0. Run the procurement agent after uploading stock and sales data.")
     else:
         # Direct summary table view (always visible)
         df_no_reorder = pd.DataFrame([

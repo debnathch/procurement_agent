@@ -202,11 +202,13 @@ def test_no_reorder_logic():
     agent = ProcurementAgent(session)
     no_reorder = agent.get_no_reorder_products()
 
-    # p1 should be in no_reorder because 500 units easily covers demand
+    # p1 should be in no_reorder because 500 units easily covers demand (net_need < 0)
     no_reorder_codes = [x['product_code'] for x in no_reorder]
     assert 'MED-AMP1' in no_reorder_codes
+    # p2 has 0 stock (net_need == 0) and must NOT be in no_reorder (belongs in Review & Correct Suggestions)
+    assert 'MED-ZERO' not in no_reorder_codes
     p1_data = next(x for x in no_reorder if x['product_code'] == 'MED-AMP1')
-    assert p1_data['net_need'] <= 0
+    assert p1_data['net_need'] < 0
     assert p1_data['stock_on_hand'] == 500.0
     assert p1_data['surplus_qty'] > 0
 
@@ -982,5 +984,55 @@ def test_healthy_no_reorder_products_excluded_from_inventory_tab():
     session.close()
 
 
+def test_net_need_zero_and_negative_tab_isolation():
+    from backend.app.services.policy import ProcurementPolicy
+    from backend.app.agent.procurement_agent import ProcurementAgent
+    from backend.app.models.entities import Product, InventoryBatch
 
+    # 1. Policy mathematics verification
+    policy = ProcurementPolicy(review_days=7, safety_days=3, expiry_risk_horizon_days=90)
 
+    # When usable stock (60) > target stock (1.0 * 55 = 55): net_need = -5 < 0
+    calc_surplus = policy.calculate(
+        avg_daily_demand=1.0, lead_time_days=45, stock_on_hand=60.0, stock_on_order=0.0,
+        usable_before_expiry=60.0, near_expiry_qty=0.0, min_order_qty=1.0, pack_size=10.0,
+        unit_cost=10.0, expiry_risk=0.0
+    )
+    assert calc_surplus['net_need'] < 0
+    assert calc_surplus['order_qty'] == 0.0
+
+    # When usable stock (55) == target stock (1.0 * 55 = 55): net_need == 0
+    calc_zero = policy.calculate(
+        avg_daily_demand=1.0, lead_time_days=45, stock_on_hand=55.0, stock_on_order=0.0,
+        usable_before_expiry=55.0, near_expiry_qty=0.0, min_order_qty=1.0, pack_size=10.0,
+        unit_cost=10.0, expiry_risk=0.0
+    )
+    assert calc_zero['net_need'] == 0.0
+    # Must propose at least 1 pack size for review and correction
+    assert calc_zero['order_qty'] >= 10.0
+
+    # 2. Database & Agent get_no_reorder_products verification
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    p_surplus = Product(product_code='MED-SURP', product_name='Surplus Med', reorder_enabled=True, unit_cost=10.0, pack_size=10.0)
+    b_surplus = InventoryBatch(product_code='MED-SURP', batch_no='BS1', qty_on_hand=200.0, qty_on_order=0.0, expiry_date=datetime(2028, 1, 1), unit_cost=10.0)
+
+    p_zero = Product(product_code='MED-ZERO-STOCK', product_name='Zero Stock Med', reorder_enabled=True, unit_cost=10.0, pack_size=10.0)
+    # Zero stock on hand -> net_need == 0 (with 0 demand)
+    b_zero = InventoryBatch(product_code='MED-ZERO-STOCK', batch_no='BZ1', qty_on_hand=0.0, qty_on_order=0.0, expiry_date=datetime(2028, 1, 1), unit_cost=10.0)
+
+    session.add_all([p_surplus, b_surplus, p_zero, b_zero])
+    session.commit()
+
+    agent = ProcurementAgent(session)
+    no_reorder = agent.get_no_reorder_products()
+    nr_codes = [x['product_code'] for x in no_reorder]
+
+    # Surplus (net_need < 0) MUST be in No Need for Reorder
+    assert 'MED-SURP' in nr_codes
+    # Zero stock / net_need == 0 MUST NOT be in No Need for Reorder (reserved for Review & Correct Suggestions)
+    assert 'MED-ZERO-STOCK' not in nr_codes
+
+    session.close()

@@ -117,7 +117,7 @@ class ProcurementPolicy:
         target_stock = avg_daily_demand * demand_multiplier * (lead_time_days + self.review_days + self.safety_days)
         net_need = target_stock - usable_before_expiry - stock_on_order
 
-        if net_need <= 0:
+        if net_need < 0:
             return {
                 'order_qty': 0.0,
                 'target_stock': round(target_stock, 2),
@@ -126,8 +126,13 @@ class ProcurementPolicy:
                 'expiry_action': expiry_action,
             }
 
-        # Round up to pack size
-        packs_needed = math.ceil(net_need / pack)
+        # For net_need >= 0 (net_need == 0 or net_need > 0):
+        # When net_need == 0 (exact threshold or zero stock buffer), recommend at least 1 pack size for review and correction
+        if net_need == 0:
+            packs_needed = 1
+        else:
+            packs_needed = math.ceil(net_need / pack)
+
         order_qty = packs_needed * pack
 
         # Enforce minimum order quantity

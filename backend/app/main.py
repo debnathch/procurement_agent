@@ -211,7 +211,7 @@ def list_no_reorder_products(
     db: Session = Depends(get_db)
 ):
     """
-    Returns active products with Net Need <= 0, ordered alphabetically by character.
+    Returns active products with Net Need < 0, ordered alphabetically by character.
     Supports optional search, company, and manufacturer filtering.
     """
     agent = ProcurementAgent(db)

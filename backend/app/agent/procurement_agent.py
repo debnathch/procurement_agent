@@ -216,13 +216,15 @@ class ProcurementAgent:
                 if other_codes:
                     consolidation_note = f" (Consolidated variants: {', '.join(other_codes)});"
 
+            zero_buffer_note = " (Stock at exact threshold / zero surplus buffer — suggested baseline for review);" if calc.get('net_need', 0) == 0 else ""
+
             rationale = (
                 f'Demand={demand:.2f}/day ({demand_source}); lead_time={lead_time}d; '
                 f'on_hand={inv["on_hand"]:.0f}; on_order={inv["on_order"]:.0f}; '
                 f'near_expiry={inv["near_expiry"]:.0f}; expired={inv["expired"]:.0f}; '
                 f'FEFO_usable={inv["usable_before_expiry"]:.0f}; target={calc["target_stock"]:.0f}; '
                 f'recommended={calc["order_qty"]:.0f}; expiry_risk={inv["expiry_risk"]:.2%}; '
-                f'action={calc["expiry_action"]}.{consolidation_note}'
+                f'action={calc["expiry_action"]}.{consolidation_note}{zero_buffer_note}'
             )
             idem = hashlib.sha256(
                 f'{run_id}:{primary_product.product_code}:{supplier.supplier_id if supplier else "NONE"}:{calc["order_qty"]}'.encode()
@@ -454,9 +456,9 @@ class ProcurementAgent:
 
             net_need = calc.get('net_need', calc['target_stock'] - usable - on_order)
             expiry_action = calc.get('expiry_action', 'NORMAL')
-            # Products whose procurement is paused due to critical expiry risk belong in the Inventory & FEFO tab
-            # Only products that genuinely have covered stock in a healthy state belong in the No Need for Reorder catalog
-            if net_need <= 0 and expiry_action != 'PAUSE_PROCUREMENT':
+            # Products qualify for 'No Need for Reorder' ONLY if net_need < 0 (strictly positive surplus beyond target stock)
+            # Products where net_need >= 0 (net_need == 0 or net_need > 0) belong in 'Review & Correct Suggestions'
+            if net_need < 0 and expiry_action != 'PAUSE_PROCUREMENT':
                 surplus_qty = round(-net_need, 2)
                 coverage_days = round(on_hand / demand, 1) if demand > 0 else 999.0
                 target_stock = calc.get('target_stock', 0.0)

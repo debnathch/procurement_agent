@@ -304,9 +304,13 @@ $$\text{Coverage Days} = L + R + S$$
 $$\text{Target Stock} = D \times M \times \text{Coverage Days}$$
 $$\text{Net Need} = \text{Target Stock} - S_{\text{usable}} - S_{\text{on\_order}}$$
 
-If $\text{Net Need} \le 0 \implies \text{Order Qty} = 0$.
+If $\text{Net Need} < 0 \implies \text{Order Qty} = 0$ (Surplus stock covers target; routed strictly to **No Need for Reorder** catalog).
 
-If $\text{Net Need} > 0$, order quantity is rounded up to the integer pack multiple ($P$) and constrained by Minimum Order Quantity ($MOQ$):
+If $\text{Net Need} = 0$, usable stock is at the exact reorder threshold or represents an out-of-stock item with zero buffer. To allow human verification, the agent suggests a baseline order of 1 pack multiple ($P$) or $MOQ$ and routes the item to **Review & Correct Suggestions**:
+
+$$\text{Order Qty}_{\text{Net Need}=0} = \max(P,\; \lceil MOQ / P \rceil \times P)$$
+
+If $\text{Net Need} > 0$, order quantity is rounded up to the integer pack multiple ($P$) and constrained by Minimum Order Quantity ($MOQ$), routed to **Review & Correct Suggestions**:
 
 $$\text{Packs} = \left\lceil \frac{\text{Net Need}}{P} \right\rceil$$
 $$\text{Order Qty} = \max(\text{Packs} \times P,\; \lceil MOQ / P \rceil \times P)$$
@@ -368,14 +372,15 @@ To support warehouse inventory audits without performance degradation or UI time
      3. All `SalesHistory` records grouped in-memory by `product_code`.
    - Reconstructs FEFO usable positions ($S_{\text{usable}}$) and daily demand velocity ($D$) entirely in RAM, completing across thousands of items in **< 35ms**.
 
-2. **Zero-Need Evaluation**:
+2. **Surplus Evaluation (`Net Need < 0`)**:
    - Identifies items where:
-     $$\text{Net Need} = \text{Target Stock} - S_{\text{usable}} - S_{\text{on\_order}} \le 0$$
+     $$\text{Net Need} = \text{Target Stock} - S_{\text{usable}} - S_{\text{on\_order}} < 0$$
+   - Items where $\text{Net Need} = 0$ (at exact coverage boundary or zero stock) are routed to **Review & Correct Suggestions** to enable pharmacist review.
    - Orders all qualified products alphabetically by character (`product_name.asc()`).
    - Supports instant substring search filtering across product codes and descriptions.
 
 3. **Strict Tab Isolation between Covered Healthy Inventory and Inventory & FEFO**:
-   - Products qualifying for the 'No Need for Reorder' catalog must have healthy covered stock (`Net Need <= 0` and `expiry_action != 'PAUSE_PROCUREMENT'`). Items whose procurement was paused due to critical expiry risk are routed to the Inventory & FEFO tab.
+   - Products qualifying for the 'No Need for Reorder' catalog must have healthy covered stock (`Net Need < 0` and `expiry_action != 'PAUSE_PROCUREMENT'`). Items whose procurement was paused due to critical expiry risk are routed to the Inventory & FEFO tab.
    - Any product that is in a healthy state in the 'No Need for Reorder' catalog is **strictly excluded from appearing in the 'Inventory and FEFO' tab** (`GET /inventory?exclude_healthy=true`). This guarantees zero cross-tab redundancy between covered healthy inventory and at-risk stock requiring expiry action.
 
 ---
@@ -566,7 +571,7 @@ To eliminate tab-resetting (where any button action or browser refresh defaulted
 | `POST` | `/proposals/{id}/decide` | Approve/modify/reject a proposal | `{"action": "approve", "approved_qty": 100, ...}` | `{"status": "EXECUTED", "reference": "..."}` |
 | `POST` | `/proposals/{id}/unapprove` | Revert an approved/executed proposal back to PENDING review | `{"reason": "...", "actor": "human-reviewer"}` | `{"status": "PENDING", "message": "..."}` |
 | `POST` | `/proposals/batch-decide` | Batch approve, reject, or revert proposals | `{"action": "approve"\|"reject"\|"unapprove", "proposal_ids": [...]}` | `{"status": "success", "processed": N}` |
-| `GET` | `/procurement/no-reorder` | Products with Net Need <= 0 (fast pre-fetch, company filtered) | `?lead_time_days=45&search=...&company=...` | `list[NoReorderProductDict]` |
+| `GET` | `/procurement/no-reorder` | Products with Net Need < 0 (fast pre-fetch, company filtered) | `?lead_time_days=45&search=...&company=...` | `list[NoReorderProductDict]` |
 | `POST` | `/ingestion/upload-marg-excel` | Multipart file upload for MARG Excel | `file: bytes, run_agent: bool, lead_time_days: int` | `{"stats": {...}, "proposals": [...]}` |
 | `GET` | `/ingestion/sample-template` | Download verified sample MARG Excel workbook | None | `application/vnd.openxmlformats` binary |
 | `POST` | `/system/reset-db` | Purge database records for fresh ingestion | None | `{"status": "success", "purged": {...}}` |
@@ -721,6 +726,7 @@ For teams standardizing on Docker deployments, `docker-compose.yml` provides a p
   * **CI/CD Pipeline Expansion**: Added `build-win-pkg` job in GitHub Actions workflow to generate and publish `win_run_pkg.zip` as an official release asset. Added `AIDeepDrive` branch CI triggers.
   * **Database Parent Directory Auto-Creation**: `backend/app/core/database.py` ensures parent directory trees exist for SQLite database paths, preventing path initialization errors during isolated or custom deployments.
   * **Tab Cross-Contamination Prevention**: Products in a healthy state in the 'No Need for Reorder' tab are strictly excluded from appearing in the 'Inventory and FEFO' tab across backend (`/inventory?exclude_healthy=true`) and frontend UI, eliminating redundancy between covered healthy stock and at-risk stock requiring expiry action.
+  * **Zero-Net-Need Tab Routing & Proposal Generation**: Formally partitioned replenishment state: products with strictly negative net need (`Net Need < 0`, indicating positive surplus stock) belong exclusively to the **No Need for Reorder** tab; products with `Net Need == 0` (stock at exact coverage threshold or zero stock buffer) and `Net Need > 0` are routed to **Review & Correct Suggestions** with baseline pack suggestions, allowing pharmacists full control to review, adjust quantities, and approve.
 
 * **v1.1**:
   * Resolved a `500 Internal Server Error` during proposal decision submissions by fixing a missing SQLAlchemy `select` import in the `feedback.py` service.
