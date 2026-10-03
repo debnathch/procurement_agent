@@ -54,6 +54,85 @@ class DemandService:
             db (Session): Active SQLAlchemy database session.
         """
         self.db: Session = db
+        self._index_cutoff: datetime | None = None
+        self._sales_by_code: dict[str, tuple[float, set]] = {}
+        self._sales_by_name: dict[str, tuple[float, set]] = {}
+        self._sales_by_canonical: dict[str, tuple[float, set]] = {}
+        self._products_by_code: dict[str, Product] = {}
+        self._canonical_to_codes: dict[str, list[str]] = {}
+        self._batch_stock_by_code: dict[str, float] = {}
+
+    def invalidate_index(self) -> None:
+        """Explicitly clear the in-memory cache."""
+        self._index_cutoff = None
+
+    def _ensure_index(self, cutoff: datetime, force: bool = False) -> None:
+        """Index sales history, products, and batch stock in memory once for O(1) velocity lookups."""
+        if self._index_cutoff == cutoff and not force:
+            return
+
+        from collections import defaultdict
+        from backend.app.adapters.excel import pharma_canonical_key
+
+        # 1. Index products
+        products = self.db.scalars(select(Product)).all()
+        self._products_by_code = {p.product_code: p for p in products}
+        self._canonical_to_codes = defaultdict(list)
+        for p in products:
+            ck = pharma_canonical_key(p.product_name)
+            self._canonical_to_codes[ck].append(p.product_code)
+
+        # 2. Index sales history since cutoff
+        sh_rows = self.db.execute(
+            select(
+                SalesHistory.product_code,
+                SalesHistory.product_name,
+                SalesHistory.sale_date,
+                SalesHistory.qty_sold
+            ).where(SalesHistory.sale_date >= cutoff)
+        ).all()
+
+        code_totals = defaultdict(float)
+        code_dates = defaultdict(set)
+        name_totals = defaultdict(float)
+        name_dates = defaultdict(set)
+        canonical_totals = defaultdict(float)
+        canonical_dates = defaultdict(set)
+
+        for p_code, p_name, s_date, qty in sh_rows:
+            q = qty or 0.0
+            if p_code:
+                code_totals[p_code] += q
+                if s_date:
+                    code_dates[p_code].add(s_date)
+            if p_name:
+                c_name = p_name.strip().upper()
+                name_totals[c_name] += q
+                if s_date:
+                    name_dates[c_name].add(s_date)
+                ck = pharma_canonical_key(p_name)
+                canonical_totals[ck] += q
+                if s_date:
+                    canonical_dates[ck].add(s_date)
+
+        self._sales_by_code = {
+            k: (code_totals[k], code_dates[k]) for k in code_totals
+        }
+        self._sales_by_name = {
+            k: (name_totals[k], name_dates[k]) for k in name_totals
+        }
+        self._sales_by_canonical = {
+            k: (canonical_totals[k], canonical_dates[k]) for k in canonical_totals
+        }
+
+        # 3. Index batch stock for stockout baselines
+        batches = self.db.scalars(select(InventoryBatch)).all()
+        batch_stocks = defaultdict(float)
+        for b in batches:
+            batch_stocks[b.product_code] += (b.qty_on_hand or 0.0)
+        self._batch_stock_by_code = dict(batch_stocks)
+
+        self._index_cutoff = cutoff
 
     def forecast_daily(
         self,
@@ -96,74 +175,51 @@ class DemandService:
             cutoff = datetime(fy_start.year, fy_start.month, fy_start.day)
             source_suffix = f'sales_since_1st_april_{fy_start.year} ({elapsed_days}d)'
 
-        result = self.db.execute(
-            select(
-                func.sum(SalesHistory.qty_sold).label('total_sold'),
-                func.count(SalesHistory.sale_date.distinct()).label('days_with_sales'),
-            ).where(
-                SalesHistory.product_code == product_code,
-                SalesHistory.sale_date >= cutoff,
-            )
-        ).one()
+        self._ensure_index(cutoff)
 
-        total_sold = result.total_sold or 0.0
-        days_with_sales = result.days_with_sales or 0
+        if product_code not in self._products_by_code:
+            prod_exists = self.db.scalars(select(Product.id).where(Product.product_code == product_code)).first()
+            if prod_exists:
+                self._ensure_index(cutoff, force=True)
 
-        if total_sold > 0 and days_with_sales > 0:
-            avg_daily = total_sold / elapsed_days
+        # 1. Exact match by product_code
+        stats = self._sales_by_code.get(product_code)
+        if stats and stats[0] > 0 and len(stats[1]) > 0:
+            avg_daily = stats[0] / elapsed_days
             return round(avg_daily, 4), source_suffix
 
         # Fallback 0: Check sales history by product_name and canonical formulation variants
         from backend.app.adapters.excel import pharma_canonical_key
-        prod = self.db.scalars(select(Product).where(Product.product_code == product_code)).first()
+        prod = self._products_by_code.get(product_code)
+        if not prod:
+            prod = self.db.scalars(select(Product).where(Product.product_code == product_code)).first()
+
         if prod and prod.product_name:
             clean_name = prod.product_name.strip().upper()
             # 0a. Match by exact product_name in SalesHistory (e.g. when sales report lacks internal codes)
-            name_res = self.db.execute(
-                select(
-                    func.sum(SalesHistory.qty_sold).label('total_sold'),
-                    func.count(SalesHistory.sale_date.distinct()).label('days_with_sales'),
-                ).where(
-                    func.upper(SalesHistory.product_name) == clean_name,
-                    SalesHistory.sale_date >= cutoff,
-                )
-            ).one()
-            name_total = name_res.total_sold or 0.0
-            name_days = name_res.days_with_sales or 0
-            if name_total > 0 and name_days > 0:
-                avg_daily = name_total / elapsed_days
+            n_stats = self._sales_by_name.get(clean_name)
+            if n_stats and n_stats[0] > 0 and len(n_stats[1]) > 0:
+                avg_daily = n_stats[0] / elapsed_days
                 return round(avg_daily, 4), source_suffix
 
             # 0b. Match by pharma_canonical_key across SalesHistory (canonical formulation fallback)
             c_key = pharma_canonical_key(prod.product_name)
-            all_sh = self.db.scalars(select(SalesHistory).where(SalesHistory.sale_date >= cutoff)).all()
-            matched_sh = [s for s in all_sh if s.product_name and pharma_canonical_key(s.product_name) == c_key]
-            if matched_sh:
-                c_total = sum(s.qty_sold for s in matched_sh)
-                c_days = len({s.sale_date for s in matched_sh if s.sale_date})
-                if c_total > 0 and c_days > 0:
-                    avg_daily = c_total / elapsed_days
-                    return round(avg_daily, 4), source_suffix
+            c_stats = self._sales_by_canonical.get(c_key)
+            if c_stats and c_stats[0] > 0 and len(c_stats[1]) > 0:
+                avg_daily = c_stats[0] / elapsed_days
+                return round(avg_daily, 4), source_suffix
 
             # 0c. Check across alternate product codes with same canonical formulation key
-            all_prods = self.db.scalars(select(Product)).all()
-            alt_codes = [
-                p.product_code for p in all_prods
-                if pharma_canonical_key(p.product_name) == c_key and p.product_code != product_code
-            ]
+            alt_codes = [c for c in self._canonical_to_codes.get(c_key, []) if c != product_code]
             if alt_codes:
-                alt_res = self.db.execute(
-                    select(
-                        func.sum(SalesHistory.qty_sold).label('total_sold'),
-                        func.count(SalesHistory.sale_date.distinct()).label('days_with_sales'),
-                    ).where(
-                        SalesHistory.product_code.in_(alt_codes),
-                        SalesHistory.sale_date >= cutoff,
-                    )
-                ).one()
-                alt_total = alt_res.total_sold or 0.0
-                alt_days = alt_res.days_with_sales or 0
-                if alt_total > 0 and alt_days > 0:
+                alt_total = 0.0
+                alt_dates = set()
+                for ac in alt_codes:
+                    ac_stats = self._sales_by_code.get(ac)
+                    if ac_stats:
+                        alt_total += ac_stats[0]
+                        alt_dates.update(ac_stats[1])
+                if alt_total > 0 and len(alt_dates) > 0:
                     avg_daily = alt_total / elapsed_days
                     return round(avg_daily, 4), source_suffix
 
@@ -175,8 +231,7 @@ class DemandService:
 
         # Fallback 2: Catalog items that are completely out of stock get baseline replenishment demand
         if product and product.reorder_enabled:
-            batches = self.db.scalars(select(InventoryBatch).where(InventoryBatch.product_code == product_code)).all()
-            total_on_hand = sum(b.qty_on_hand for b in batches)
+            total_on_hand = self._batch_stock_by_code.get(product_code, 0.0)
             if total_on_hand <= 0:
                 baseline = max(1.0, product.min_order_qty, product.pack_size) / 30.0
                 return round(baseline, 4), 'stockout_replenishment_baseline'

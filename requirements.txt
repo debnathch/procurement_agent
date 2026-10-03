@@ -9,3 +9,4 @@ python-multipart
 requests
 pydantic-settings
 pytest
+python-calamine

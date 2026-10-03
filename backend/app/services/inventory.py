@@ -30,6 +30,28 @@ class InventoryService:
             db (Session): Active SQLAlchemy database session.
         """
         self.db: Session = db
+        self._canonical_to_codes: dict[str, list[str]] | None = None
+        self._code_to_prod: dict[str, Product] | None = None
+        self._batches_by_code: dict[str, list[InventoryBatch]] | None = None
+
+    def _ensure_index(self) -> None:
+        """Loads and indexes products and batches in memory once for O(1) lookups."""
+        if self._canonical_to_codes is not None:
+            return
+        from collections import defaultdict
+        from backend.app.adapters.excel import pharma_canonical_key
+
+        prods = self.db.scalars(select(Product)).all()
+        self._code_to_prod = {p.product_code: p for p in prods}
+        self._canonical_to_codes = defaultdict(list)
+        for p in prods:
+            ck = pharma_canonical_key(p.product_name)
+            self._canonical_to_codes[ck].append(p.product_code)
+
+        all_batches = self.db.scalars(select(InventoryBatch)).all()
+        self._batches_by_code = defaultdict(list)
+        for b in all_batches:
+            self._batches_by_code[b.product_code].append(b)
 
     def position(self, product_code: str, avg_daily_demand: float) -> dict:
         """
@@ -63,19 +85,23 @@ class InventoryService:
         horizon = now + timedelta(days=settings.expiry_risk_horizon_days)
 
         from backend.app.adapters.excel import pharma_canonical_key
-        prod = self.db.scalars(select(Product).where(Product.product_code == product_code)).first()
+
+        self._ensure_index()
+
+        prod = self._code_to_prod.get(product_code) if self._code_to_prod else None
         alt_codes = [product_code]
         if prod:
             c_key = pharma_canonical_key(prod.product_name)
-            all_prods = self.db.scalars(select(Product)).all()
-            alt_codes = list({
-                p.product_code for p in all_prods
-                if pharma_canonical_key(p.product_name) == c_key
-            } | {product_code})
+            alt_codes = list(set(self._canonical_to_codes.get(c_key, [])) | {product_code})
 
-        batches = self.db.scalars(
-            select(InventoryBatch).where(InventoryBatch.product_code.in_(alt_codes))
-        ).all()
+        batches = []
+        if self._batches_by_code:
+            for code in alt_codes:
+                batches.extend(self._batches_by_code.get(code, []))
+        else:
+            batches = self.db.scalars(
+                select(InventoryBatch).where(InventoryBatch.product_code.in_(alt_codes))
+            ).all()
 
         on_hand = 0.0
         on_order = 0.0

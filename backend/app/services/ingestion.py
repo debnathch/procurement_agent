@@ -36,13 +36,18 @@ class IngestionService:
         self.db: Session = db
         # Cache: product_name (upper-stripped) → existing product_code in DB
         self._name_to_code: dict[str, str] = {}
+        self._existing_codes: set[str] = set()
+        self._existing_code_batches: set[tuple[str, str]] = set()
 
     def _build_name_index(self) -> None:
         """Load all existing product names → codes into the local dedup cache."""
         from backend.app.adapters.excel import pharma_canonical_key, canonical_medicine_key, _make_stable_code
         rows = self.db.execute(
-            select(Product.product_code, Product.product_name, Product.category)
+            select(Product.product_code, Product.product_name, Product.category, Product.batch_no)
         ).all()
+        self._existing_codes = {r[0] for r in rows if r[0]}
+        self._existing_code_batches = {(r[0], r[3]) for r in rows if r[0] and r[3]}
+
         sorted_rows = sorted(rows, key=lambda r: 1 if (r.category or '').startswith('ZZZZ') else 0)
         self._name_to_code = {}
         for row in sorted_rows:
@@ -64,7 +69,7 @@ class IngestionService:
 
     def _resolve_code(self, incoming_code: str, incoming_name: str) -> str:
         """
-        Returns the canonical product_code to use for this product.
+        Returns the canonical product_code to use for this product in O(1) time without DB roundtrips.
 
         Priority:
           1. Exact code already in DB          → use it.
@@ -73,7 +78,7 @@ class IngestionService:
           4. Pharma formulation match          → reuse existing code (packaging format variation).
           5. Neither                           → incoming_code is new, use it.
         """
-        if incoming_code and self.db.scalars(select(Product.id).where(Product.product_code == incoming_code)).first():
+        if incoming_code and incoming_code in self._existing_codes:
             return incoming_code
         name_key = (incoming_name or '').strip().upper()
         if name_key and name_key in self._name_to_code:
@@ -147,49 +152,55 @@ class IngestionService:
         Returns the number of products updated.
         """
         from backend.app.services.forecast import DemandService
-        from backend.app.adapters.excel import _make_stable_code
 
         LEAD_TIME_DAYS = 45
         SAFETY_FACTOR = 1.5
-        updated = 0
 
         # All products that have at least one sales history row
         products_with_sales = self.db.execute(
             select(SalesHistory.product_code).distinct()
         ).scalars().all()
 
+        if not products_with_sales:
+            return 0
+
         demand_svc = DemandService(self.db)
 
-        for p_code in products_with_sales:
-            # Get current stock from inventory batches
-            batch_stock = self.db.execute(
-                select(func.sum(InventoryBatch.qty_on_hand)).where(
-                    InventoryBatch.product_code == p_code
-                )
-            ).scalar() or 0.0
+        # Batch stock pre-aggregated in 1 SQL query
+        batch_stocks = dict(
+            self.db.execute(
+                select(InventoryBatch.product_code, func.sum(InventoryBatch.qty_on_hand))
+                .group_by(InventoryBatch.product_code)
+            ).all()
+        )
 
-            # Get demand velocity (Daily Demand Velocity = Total Sales / Days since 1st April)
+        updates = []
+        for p_code in products_with_sales:
+            batch_stock = batch_stocks.get(p_code, 0.0) or 0.0
             avg_daily, _source = demand_svc.forecast_daily(p_code)
 
             if avg_daily <= 0:
                 continue
 
-            # Pharma-standard reorder point
             new_reorder = round(avg_daily * LEAD_TIME_DAYS * SAFETY_FACTOR, 2)
+            updates.append({
+                'p_code': p_code,
+                'reorder_point': new_reorder,
+                'current_stock': batch_stock,
+            })
 
-            # Update product master
+        for u in updates:
             self.db.execute(
                 update(Product)
-                .where(Product.product_code == p_code)
+                .where(Product.product_code == u['p_code'])
                 .values(
-                    reorder_point=new_reorder,
-                    current_stock=batch_stock,
+                    reorder_point=u['reorder_point'],
+                    current_stock=u['current_stock'],
                 )
             )
-            updated += 1
 
         self.db.commit()
-        return updated
+        return len(updates)
 
     def ingest_excel(
         self,
@@ -243,13 +254,17 @@ class IngestionService:
         }
 
         # ── 1. Upsert Suppliers ───────────────────────────────────────────────
+        existing_sups = {s.supplier_id: s for s in self.db.scalars(select(Supplier)).all()}
         for s_data in suppliers_data:
-            existing = self.db.get(Supplier, s_data['supplier_id'])
-            if existing:
+            sid = s_data['supplier_id']
+            if sid in existing_sups:
+                existing = existing_sups[sid]
                 for k, v in s_data.items():
                     setattr(existing, k, v)
             else:
-                self.db.add(Supplier(**s_data))
+                new_sup = Supplier(**s_data)
+                self.db.add(new_sup)
+                existing_sups[sid] = new_sup
             stats['suppliers_upserted'] += 1
 
         self.db.flush()
@@ -259,39 +274,29 @@ class IngestionService:
         # If the file is an auxiliary sales file and product catalog is already populated,
         # skip adding product entries completely to preserve catalog purity.
         is_sales_file = (len(sales_data) > 0 and len(batches_data) == 0)
-        has_existing_products = (self.db.scalars(select(func.count(Product.id))).one() > 0)
+        has_existing_products = len(self._existing_codes) > 0
 
         if not (is_sales_file and has_existing_products):
+            prods_to_add = []
             for p_data in products_data:
                 incoming_code = p_data['product_code']
                 incoming_name = p_data['product_name']
                 is_stock = p_data.get('is_stock_row', False)
 
                 resolved_code = self._resolve_code(incoming_code, incoming_name)
-                existing = self.db.scalars(
-                    select(Product.id).where(
-                        (Product.product_code == resolved_code) |
-                        (Product.product_code == incoming_code)
-                    )
-                ).first()
+                is_existing = (resolved_code in self._existing_codes or incoming_code in self._existing_codes)
 
                 if not is_stock:
                     # For auxiliary reports (sales summaries, purchase summaries, outstanding),
                     # never insert duplicate product records if product exists or catalog exists.
-                    if existing or has_existing_products:
+                    if is_existing or has_existing_products:
                         stats['duplicates_merged'] += 1
                         continue
                 else:
                     # For stock sheets, check if exact batch already exists
                     batch_no = p_data.get('batch_no')
-                    if existing and batch_no:
-                        existing_batch = self.db.scalars(
-                            select(Product.id).where(
-                                (Product.product_code == resolved_code) | (Product.product_code == incoming_code),
-                                Product.batch_no == batch_no
-                            )
-                        ).first()
-                        if existing_batch:
+                    if is_existing and batch_no:
+                        if (resolved_code, batch_no) in self._existing_code_batches or (incoming_code, batch_no) in self._existing_code_batches:
                             stats['duplicates_merged'] += 1
                             continue
 
@@ -314,12 +319,17 @@ class IngestionService:
                     supplier_name=p_data.get('supplier_name'),
                     preferred_supplier_id=p_data.get('preferred_supplier_id'),
                 )
-                self.db.add(prod)
+                prods_to_add.append(prod)
+                self._existing_codes.add(resolved_code)
+                if p_data.get('batch_no'):
+                    self._existing_code_batches.add((resolved_code, p_data.get('batch_no')))
                 stats['products_upserted'] += 1
 
-            self.db.flush()
-            # Refresh cache with any freshly inserted products
-            self._build_name_index()
+            if prods_to_add:
+                self.db.add_all(prods_to_add)
+                self.db.flush()
+                # Refresh cache with any freshly inserted products
+                self._build_name_index()
 
         # ── 3. Replace Inventory Batches ─────────────────────────────────────
         resolved_batches = []
@@ -332,12 +342,13 @@ class IngestionService:
 
         batch_product_codes = list({b['product_code'] for b in resolved_batches})
         if batch_product_codes:
-            for p_code in batch_product_codes:
-                existing_p = self.db.scalars(select(Product.id).where(Product.product_code == p_code)).first()
-                if not existing_p:
+            missing_codes = [c for c in batch_product_codes if c not in self._existing_codes]
+            if missing_codes:
+                missing_prods = []
+                for p_code in missing_codes:
                     matching_batch = next((b for b in batches_data if b['product_code'] == p_code), None)
                     batch_comp = matching_batch.get('company') if matching_batch else 'General'
-                    self.db.add(Product(
+                    missing_prods.append(Product(
                         product_code=p_code,
                         product_name=p_code,
                         category='General',
@@ -346,7 +357,9 @@ class IngestionService:
                         pack_size=1.0,
                         unit_cost=0.0,
                     ))
-            self.db.flush()
+                    self._existing_codes.add(p_code)
+                self.db.add_all(missing_prods)
+                self.db.flush()
 
             self.db.execute(
                 delete(InventoryBatch).where(
@@ -354,13 +367,14 @@ class IngestionService:
                 )
             )
 
-        for b_data in resolved_batches:
-            self.db.add(InventoryBatch(**b_data))
-            stats['batches_inserted'] += 1
+        if resolved_batches:
+            self.db.add_all([InventoryBatch(**b) for b in resolved_batches])
+            stats['batches_inserted'] += len(resolved_batches)
 
         # ── 4. Insert Sales History ──────────────────────────────────────────
         # product_name is stored as-is from MARG for traceability.
         # product_code is resolved to the canonical code via normalization.
+        sales_records = []
         for s_data in sales_data:
             raw_name = s_data.get('product_name', '')
             p_code = s_data['product_code']
@@ -370,10 +384,12 @@ class IngestionService:
 
             s_rec = dict(s_data)
             s_rec['product_code'] = resolved_code
-            # Keep product_name in the record — it maps to SalesHistory.product_name column
             s_rec['product_name'] = raw_name
-            self.db.add(SalesHistory(**s_rec))
-            stats['sales_inserted'] += 1
+            sales_records.append(SalesHistory(**s_rec))
+
+        if sales_records:
+            self.db.add_all(sales_records)
+            stats['sales_inserted'] += len(sales_records)
 
         self.db.commit()
 

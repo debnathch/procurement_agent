@@ -722,13 +722,16 @@ class MargExcelParser:
         }
 
         excel_file: pd.ExcelFile | None = None
+        source = io.BytesIO(file_content) if isinstance(file_content, bytes) else file_content
         try:
-            if isinstance(file_content, bytes):
-                excel_file = pd.ExcelFile(io.BytesIO(file_content))
-            else:
-                excel_file = pd.ExcelFile(file_content)
+            excel_file = pd.ExcelFile(source, engine="calamine")
         except Exception:
-            excel_file = None
+            try:
+                if isinstance(file_content, bytes):
+                    source = io.BytesIO(file_content)
+                excel_file = pd.ExcelFile(source)
+            except Exception:
+                excel_file = None
 
         if excel_file is not None:
             for sheet_name in excel_file.sheet_names:
@@ -934,7 +937,7 @@ class MargExcelParser:
         if not qty_col and len(df.columns) > 1:
             qty_col = df.columns[1]
 
-        for _, row in df.iterrows():
+        for row in df.to_dict('records'):
             name = _clean_str(row.get(name_col))
             if not name or is_footer_or_junk_row(name):
                 continue
@@ -977,7 +980,7 @@ class MargExcelParser:
                 rate_col = c
                 break
 
-        for _, row in df.iterrows():
+        for row in df.to_dict('records'):
             name = _clean_str(row.get(name_col))
             if not name or is_footer_or_junk_row(name):
                 continue
@@ -1008,7 +1011,7 @@ class MargExcelParser:
         seen_suppliers: set[str] = {s['supplier_id'] for s in out['suppliers']}
         seen_names: set[str] = {s['supplier_name'].strip().upper() for s in out['suppliers'] if s.get('supplier_name')}
 
-        for idx, row in df.iterrows():
+        for row in df.to_dict('records'):
             raw_name = row.get('supplier_name')
             name = sanitize_supplier_name(raw_name)
             if not name or name.upper() in seen_names:
@@ -1065,7 +1068,7 @@ class MargExcelParser:
                 except Exception:
                     pass
 
-        for idx, row in df.iterrows():
+        for row in df.to_dict('records'):
             party_name = _clean_str(row.get('product_name') or row.get('supplier_name'))
             if not party_name or party_name.upper() in ('TOTAL', 'GRAND TOTAL', 'NAN', 'NONE'):
                 continue
@@ -1124,7 +1127,7 @@ class MargExcelParser:
         seen_products: set[str] = {p['product_code'] for p in out['products']}
         seen_suppliers: set[str] = {s['supplier_id'] for s in out['suppliers']}
 
-        for _, row in df.iterrows():
+        for row in df.to_dict('records'):
             code = _clean_str(row.get('product_code'))
             name = _clean_str(row.get('product_name'))
             # If item and description were in separate columns (e.g. 'I T E M' and 'D E S C R I P T I O N')
@@ -1264,7 +1267,7 @@ class MargExcelParser:
     def _extract_sales(cls, df: pd.DataFrame, out: dict[str, list[dict[str, Any]]]):
         seen_products: set[str] = {p['product_code'] for p in out['products']}
 
-        for _, row in df.iterrows():
+        for row in df.to_dict('records'):
             code = _clean_str(row.get('product_code'))
             name = _clean_str(row.get('product_name'))
             if not code and not name:

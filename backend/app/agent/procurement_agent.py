@@ -119,6 +119,10 @@ class ProcurementAgent:
             pkey = pharma_canonical_key(p.product_name)
             groups[pkey].append(p)
 
+        all_suppliers = self.db.scalars(select(Supplier)).all()
+        supplier_by_id = {s.supplier_id: s for s in all_suppliers}
+        supplier_by_name = {s.supplier_name.strip().upper(): s for s in all_suppliers if s.supplier_name}
+
         proposals = []
 
         for pkey, variant_products in groups.items():
@@ -152,9 +156,9 @@ class ProcurementAgent:
 
             supplier = None
             if default_supplier_id:
-                supplier = self.db.get(Supplier, default_supplier_id)
+                supplier = supplier_by_id.get(default_supplier_id)
             if not supplier and default_supplier_name:
-                supplier = self.db.scalars(select(Supplier).where(Supplier.supplier_name == default_supplier_name)).first()
+                supplier = supplier_by_name.get(default_supplier_name.strip().upper())
             if not supplier:
                 supplier = self.suppliers.choose(primary_product)
 

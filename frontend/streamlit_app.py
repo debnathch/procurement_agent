@@ -109,11 +109,14 @@ BACKEND_URL = st.sidebar.text_input("Backend API URL", "http://127.0.0.1:8000")
 
 
 def check_backend_health():
-    try:
-        r = requests.get(f"{BACKEND_URL}/health", timeout=3)
-        return r.status_code == 200, r.json() if r.status_code == 200 else {}
-    except Exception:
-        return False, {}
+    for _ in range(2):
+        try:
+            r = requests.get(f"{BACKEND_URL}/health", timeout=5)
+            if r.status_code == 200:
+                return True, r.json()
+        except Exception:
+            pass
+    return False, {}
 
 
 is_healthy, health_info = check_backend_health()

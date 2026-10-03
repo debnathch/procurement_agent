@@ -645,7 +645,7 @@ def get_sample_marg_template():
 
 
 @app.post('/ingestion/upload-marg-excel', tags=['ingestion'])
-async def upload_marg_excel(
+def upload_marg_excel(
     file: UploadFile = File(...),
     run_agent: bool = Query(True, description='Automatically run procurement agent after ingestion'),
     lead_time_days: Optional[int] = Query(None, description='Configurable lead time override in days'),
@@ -657,6 +657,7 @@ async def upload_marg_excel(
     Ingests Products, Inventory Batches, Expiries, Suppliers, and Sales History.
     If clear_existing is True (default), completely purges stale historical data.
     If run_agent is True, immediately computes procurement recommendations!
+    Executed in threadpool so FastAPI event loop and /health remain 100% responsive.
     """
     filename_lower = file.filename.lower()
     if not (filename_lower.endswith('.xlsx') or filename_lower.endswith('.xls') or filename_lower.endswith('.csv')):
@@ -665,7 +666,7 @@ async def upload_marg_excel(
             detail='Invalid file format. Please upload a MARG export file (.xlsx, .xls, or .csv).'
         )
 
-    content = await file.read()
+    content = file.file.read()
     ingestion_service = IngestionService(db)
 
     logger.info(
