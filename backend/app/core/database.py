@@ -126,6 +126,8 @@ def init_db():
             ('sales_history', 'free_qty', 'FLOAT DEFAULT 0.0'),
             ('sales_history', 'rate', 'FLOAT DEFAULT 0.0'),
             ('sales_history', 'amount', 'FLOAT DEFAULT 0.0'),
+            # v3 — customers group/category classification
+            ('customers', 'group_name', 'VARCHAR(128)'),
         ]:
             try:
                 cols = [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]

@@ -733,15 +733,23 @@ def get_system_logs(lines: int = 100):
 # ---------------------------------------------------------------------------
 # Sales Intelligence & Customer Recommendations
 # ---------------------------------------------------------------------------
+@app.get('/sales/customer-groups', tags=['sales'])
+def list_sales_customer_groups(db: Session = Depends(get_db)):
+    """Retrieves all distinct customer groups/categories from MARG customer master."""
+    svc = SalesIntelligenceService(db)
+    return svc.list_customer_groups()
+
+
 @app.get('/sales/customers', tags=['sales'])
 def list_sales_customers(
     search: Optional[str] = None,
+    group: Optional[str] = None,
     limit: int = 500,
     db: Session = Depends(get_db)
 ):
-    """Retrieves all customers with total sales and current dues."""
+    """Retrieves all customers with total sales and current dues, optionally filtered by group."""
     svc = SalesIntelligenceService(db)
-    return svc.list_customers(search=search, limit=limit)
+    return svc.list_customers(search=search, group=group, limit=limit)
 
 
 @app.get('/sales/customers/{customer_code}/summary', tags=['sales'])
@@ -790,6 +798,18 @@ def upload_sales_marg_excel(
         'status': 'success',
         'filename': file.filename,
         'stats': stats,
+    }
+
+
+@app.post('/sales/purge-customers', tags=['sales'])
+def purge_sales_customers(db: Session = Depends(get_db)):
+    """Purges all customer master records and outstanding receivables from the database."""
+    ingestion_service = IngestionService(db)
+    purged_stats = ingestion_service.purge_customer_data()
+    return {
+        'status': 'success',
+        'message': 'Customer database purged successfully. Ready for fresh import.',
+        'purged': purged_stats,
     }
 
 

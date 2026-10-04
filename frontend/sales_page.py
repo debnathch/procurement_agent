@@ -28,52 +28,13 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
     st.markdown("---")
 
-    # Section 1: Upload MARG Sales Excel & Demo Data
-    with st.expander("📥 Upload MARG Sales / Customer / Receivables Excel", expanded=False):
-        col_up1, col_up2 = st.columns([2, 1])
-        with col_up1:
-            sales_file = st.file_uploader(
-                "Upload MARG Sales Register, Customer Master, or Bill-wise Outstanding (.xlsx, .xls, .csv)",
-                type=["xlsx", "xls", "csv"],
-                key="sales_uploader_file"
-            )
-            if sales_file:
-                if st.button("🚀 Ingest MARG Sales Data", type="primary", key="btn_ingest_sales"):
-                    with st.spinner("Ingesting MARG data..."):
-                        try:
-                            files = {"file": (sales_file.name, sales_file.getvalue())}
-                            res = requests.post(f"{BACKEND_URL}/sales/upload-marg", files=files, timeout=60)
-                            if res.status_code == 200:
-                                data = res.json()
-                                stats = data.get("stats", {})
-                                st.success(
-                                    f"✅ Ingestion Successful! "
-                                    f"Customers: {stats.get('customers_upserted', 0)}, "
-                                    f"Sales Lines: {stats.get('sales_inserted', 0)}, "
-                                    f"Receivables: {stats.get('receivables_upserted', 0)}"
-                                )
-                                st.rerun()
-                            else:
-                                st.error(f"Upload failed: {res.text}")
-                        except Exception as e:
-                            st.error(f"Error communicating with backend: {e}")
+    # Session Banners
+    if "sales_upload_banner" in st.session_state and st.session_state["sales_upload_banner"]:
+        st.success(st.session_state.pop("sales_upload_banner"))
+    if "sales_upload_error" in st.session_state and st.session_state["sales_upload_error"]:
+        st.error(st.session_state.pop("sales_upload_error"))
 
-        with col_up2:
-            st.markdown("#### 🧪 Quick Demo Data")
-            st.caption("Instantly load realistic sample MARG customers, receivables, and sales history for testing.")
-            if st.button("Load Demo Customers & Dues", key="btn_seed_demo_sales", use_container_width=True):
-                with st.spinner("Loading demo customers..."):
-                    try:
-                        res = requests.post(f"{BACKEND_URL}/sales/seed-demo", timeout=15)
-                        if res.status_code == 200:
-                            st.success("✅ Demo customers and sales loaded successfully!")
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to load demo data: {res.text}")
-                    except Exception as e:
-                        st.error(f"Error communicating with backend: {e}")
-
-    # Section 2: Fetch Customer List
+    # Fetch Customer List first to know if we need the import center expanded
     customers = []
     if is_healthy:
         try:
@@ -83,34 +44,153 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         except Exception as e:
             st.error(f"Error loading customers from backend: {e}")
 
+    # Section 1: Upload MARG Sales Excel & Demo Data
+    expand_upload = st.session_state.get("expand_sales_upload", len(customers) == 0)
+    with st.expander("📥 MARG Sales, Customer & Receivables Data Import Center", expanded=expand_upload):
+        col_up1, col_up2 = st.columns([2, 1])
+        with col_up1:
+            sales_file = st.file_uploader(
+                "Select MARG Sales Register, Customer Master, or Bill-wise Outstanding (.xlsx, .xls, .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="sales_uploader_file"
+            )
+            col_f1, col_f2 = st.columns([1, 1])
+            with col_f1:
+                do_upload = st.button("🚀 Ingest MARG Data", type="primary", key="btn_ingest_sales", use_container_width=True)
+            with col_f2:
+                do_purge = st.button("🗑️ Purge Customer Database", type="secondary", key="btn_purge_sales", use_container_width=True, help="Permanently delete all customer records and outstanding dues.")
+
+            if do_purge:
+                with st.spinner("Purging customer database..."):
+                    try:
+                        res = requests.post(f"{BACKEND_URL}/sales/purge-customers", timeout=30)
+                        if res.status_code == 200:
+                            data = res.json()
+                            purged = data.get("purged", {})
+                            c_del = purged.get("deleted_customers", 0)
+                            r_del = purged.get("deleted_receivables", 0)
+                            st.session_state["sales_upload_banner"] = f"🗑️ Customer database purged! Removed {c_del} customer(s) and {r_del} receivable record(s)."
+                            st.session_state["expand_sales_upload"] = True
+                            st.rerun()
+                        else:
+                            st.session_state["sales_upload_error"] = f"Purge failed ({res.status_code}): {res.text}"
+                            st.session_state["expand_sales_upload"] = True
+                            st.rerun()
+                    except Exception as e:
+                        st.session_state["sales_upload_error"] = f"Error communicating with backend: {e}"
+                        st.session_state["expand_sales_upload"] = True
+                        st.rerun()
+
+            if do_upload:
+                if not sales_file:
+                    st.warning("⚠️ Please select an Excel file (.xlsx, .xls, .csv) above before clicking 'Ingest MARG Data'.")
+                else:
+                    with st.spinner(f"Ingesting '{sales_file.name}' into database..."):
+                        try:
+                            files = {"file": (sales_file.name, sales_file.getvalue())}
+                            params = {"clear_existing": False}
+                            res = requests.post(f"{BACKEND_URL}/sales/upload-marg", files=files, params=params, timeout=120)
+                            if res.status_code == 200:
+                                data = res.json()
+                                stats = data.get("stats", {})
+                                c_count = stats.get('customers_upserted', 0)
+                                s_count = stats.get('sales_inserted', 0)
+                                r_count = stats.get('receivables_upserted', 0)
+                                if c_count == 0 and s_count == 0 and r_count == 0:
+                                    st.session_state["sales_upload_error"] = (
+                                        f"⚠️ File '{sales_file.name}' was uploaded, but no customer records or sales/dues columns could be recognized. "
+                                        f"Please ensure columns like Party Name, Total Sales, or Dues are present."
+                                    )
+                                else:
+                                    st.session_state["sales_upload_banner"] = (
+                                        f"✅ Successfully ingested '{sales_file.name}'! "
+                                        f"Customers: {c_count}, Sales Lines: {s_count}, Receivables: {r_count}"
+                                    )
+                                st.session_state["expand_sales_upload"] = False
+                                st.rerun()
+                            else:
+                                st.session_state["sales_upload_error"] = f"Upload failed ({res.status_code}): {res.text}"
+                                st.session_state["expand_sales_upload"] = True
+                                st.rerun()
+                        except Exception as e:
+                            st.session_state["sales_upload_error"] = f"Error communicating with backend: {e}"
+                            st.session_state["expand_sales_upload"] = True
+                            st.rerun()
+
+        with col_up2:
+            st.markdown("#### 🧪 Quick Demo Data")
+            st.caption("Instantly load realistic sample MARG customers, receivables, and sales history for testing.")
+            if st.button("Load Demo Customers & Dues", key="btn_seed_demo_sales", use_container_width=True):
+                with st.spinner("Loading demo customers..."):
+                    try:
+                        res = requests.post(f"{BACKEND_URL}/sales/seed-demo", timeout=15)
+                        if res.status_code == 200:
+                            st.session_state["sales_upload_banner"] = "✅ Demo customers, receivables, and sales history loaded successfully!"
+                            st.session_state["expand_sales_upload"] = False
+                            st.rerun()
+                        else:
+                            st.session_state["sales_upload_error"] = f"Failed to load demo data: {res.text}"
+                            st.rerun()
+                    except Exception as e:
+                        st.session_state["sales_upload_error"] = f"Error communicating with backend: {e}"
+                        st.rerun()
+
+    # Section 2: Customer Selection
     if not customers:
-        st.info("ℹ️ No customer records found. Please expand the upload section above to upload a MARG Sales file or click 'Load Demo Customers & Dues'.")
+        st.info("ℹ️ No customer records found. Please expand the upload section above to upload a MARG Sales/Customer file or click 'Load Demo Customers & Dues'.")
         return
 
-    # Section 3: Customer Selector Dropdown
-    st.markdown("### 👤 Select Customer")
+    # Section 3: Cascading Category / Group and Customer Selector Dropdowns
+    st.markdown("### 👤 Select Customer by Category / Group")
+
+    # Extract distinct groups from customer list (populated from Excel 'Group' column)
+    all_groups = []
+    seen_groups = set()
+    for c in customers:
+        grp = c.get('group_name')
+        if grp and str(grp).strip() and str(grp).strip() not in seen_groups:
+            all_groups.append(str(grp).strip())
+            seen_groups.add(str(grp).strip())
+    all_groups.sort()
+
+    col_cat, col_cust = st.columns([1, 2])
+    with col_cat:
+        group_options = ["All Categories / Groups"] + all_groups
+        selected_group = st.selectbox(
+            "1️⃣ Category / Group (from Excel 'Group'):",
+            options=group_options,
+            key="sales_selected_group_dropdown"
+        )
+
+    # Filter customers by selected group
+    if selected_group != "All Categories / Groups":
+        filtered_customers = [c for c in customers if c.get('group_name') == selected_group]
+    else:
+        filtered_customers = customers
+
+    if not filtered_customers:
+        st.warning(f"No customers found in category '{selected_group}'.")
+        return
+
     cust_options = []
     cust_code_map = {}
-
-    for c in customers:
+    for c in filtered_customers:
         code = c['customer_code']
         name = c['customer_name']
         dist = c.get('district', 'General')
+        grp = c.get('group_name') or 'General'
         tot_s = c.get('total_sales', 0.0)
         dues = c.get('current_dues', 0.0)
-        label = f"{name} ({code}) — [{dist}] | Sales: ₹{tot_s:,.0f} | Dues: ₹{dues:,.0f}"
+        label = f"{name} ({code}) — [{grp} | {dist}] | Sales: ₹{tot_s:,.0f} | Dues: ₹{dues:,.0f}"
         cust_options.append(label)
         cust_code_map[label] = code
 
-    col_sel1, col_sel2 = st.columns([3, 1])
-    with col_sel1:
+    with col_cust:
         selected_label = st.selectbox(
-            "Choose a customer to inspect financial dues, purchase trends, and recommendations:",
+            f"2️⃣ Customer ({len(filtered_customers)} in this category):",
             options=cust_options,
             key="sales_selected_customer_label"
         )
-    with col_sel2:
-        st.metric("Total Active Customers", len(customers))
 
     selected_code = cust_code_map.get(selected_label)
     if not selected_code:
@@ -133,6 +213,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
     # Section 5: Customer Profile Card
     cust_name = summary.get('customer_name', selected_code)
+    cust_group = summary.get('group_name', 'General')
     cust_district = summary.get('district', 'West Bengal')
     cust_salesperson = summary.get('salesperson', 'Sales Team')
     cust_credit_limit = summary.get('credit_limit', 0.0)
@@ -142,6 +223,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         <div style="font-size: 1.4rem; font-weight: 700; color: #1E293B;">🏢 {cust_name}</div>
         <div style="color: #64748B; font-size: 0.95rem; margin-top: 4px;">
             <b>Customer Code:</b> <code>{selected_code}</code> &nbsp;|&nbsp;
+            <b>Category / Group:</b> <span style="background-color: #E0E7FF; color: #4338CA; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">{cust_group}</span> &nbsp;|&nbsp;
             <b>District:</b> {cust_district} &nbsp;|&nbsp;
             <b>Salesperson:</b> {cust_salesperson} &nbsp;|&nbsp;
             <b>Credit Limit:</b> ₹{cust_credit_limit:,.2f}

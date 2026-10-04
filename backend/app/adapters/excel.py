@@ -1443,10 +1443,23 @@ class MargExcelParser:
             mr_name = _clean_str(row.get('salesperson') or row.get('channel') or row.get('mrname') or row.get('salesman') or 'Sales Team')
             cr_days = int(_parse_float(row.get('lead_time_days') or row.get('creditdays') or row.get('crdays'), settings.default_lead_time_days))
 
+            grp_name = _clean_str(
+                row.get('group_name') or
+                row.get('group') or
+                row.get('category') or
+                row.get('customer_group') or
+                row.get('party_group') or
+                row.get('grp') or
+                row.get('ac_group') or
+                row.get('ledger_group') or
+                ''
+            )
+
             if code not in seen_codes:
                 out['customers'].append({
                     'customer_code': code,
                     'customer_name': name,
+                    'group_name': grp_name or None,
                     'address': _clean_str(row.get('address') or row.get('remarks') or ''),
                     'area': _clean_str(row.get('area') or ''),
                     'district': _clean_str(row.get('district') or row.get('place') or row.get('city') or 'General'),

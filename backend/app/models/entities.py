@@ -153,6 +153,7 @@ class Customer(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_code: Mapped[str] = mapped_column(String(64), nullable=False)
     customer_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    group_name: Mapped[str | None] = mapped_column(String(128))   # MARG Group / Category
     address: Mapped[str | None] = mapped_column(String(256))
     area: Mapped[str | None] = mapped_column(String(128))
     district: Mapped[str | None] = mapped_column(String(128))
@@ -166,6 +167,7 @@ class Customer(Base):
 
     __table_args__ = (
         Index('ix_customers_code', 'customer_code'),
+        Index('ix_customers_group', 'group_name'),
     )
 
 

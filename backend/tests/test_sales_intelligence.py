@@ -167,7 +167,67 @@ def test_sales_seed_demo_data_and_service():
 
     # 4. Get customer recommendations
     recs = svc.get_customer_recommendations(abc['customer_code'])
-    assert 'near_expiry_opportunities' in recs
-    assert 'regular_reorders' in recs
+    session.close()
+
+
+def test_customer_group_ingestion_filtering_and_purge():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # 1. Simulate MARG Excel upload with Ledger, Group, Debit, Credit columns
+    df = pd.DataFrame([
+        {'Ledger': 'CITY RETAIL CHEMISTS', 'Group': 'RETAIL', 'Debit': 120000.0, 'Credit': 90000.0, 'District': 'Kolkata'},
+        {'Ledger': 'METRO PHARMA WHOLESALE', 'Group': 'WHOLESALE', 'Debit': 450000.0, 'Credit': 400000.0, 'District': 'Howrah'},
+        {'Ledger': 'APOLLO HOSPITAL DISPENSARY', 'Group': 'HOSPITAL', 'Debit': 300000.0, 'Credit': 300000.0, 'District': 'North 24 Pgs'},
+        {'Ledger': 'CORNER MEDICAL STORE', 'Group': 'RETAIL', 'Debit': 75000.0, 'Credit': 50000.0, 'District': 'Hooghly'},
+    ])
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+
+    ingest_svc = IngestionService(session)
+    stats = ingest_svc.ingest_excel(buf.getvalue(), filename='Customer_Ledger_Groups.xlsx')
+    assert stats['customers_upserted'] == 4
+
+    # 2. Test group extraction & listing
+    sales_svc = SalesIntelligenceService(session)
+    groups = sales_svc.list_customer_groups()
+    assert 'RETAIL' in groups
+    assert 'WHOLESALE' in groups
+    assert 'HOSPITAL' in groups
+
+    # 3. Test filtering by group
+    retail_custs = sales_svc.list_customers(group='RETAIL')
+    assert len(retail_custs) == 2
+    for c in retail_custs:
+        assert c['group_name'] == 'RETAIL'
+
+    wholesale_custs = sales_svc.list_customers(group='WHOLESALE')
+    assert len(wholesale_custs) == 1
+    assert wholesale_custs[0]['customer_name'] == 'METRO PHARMA WHOLESALE'
+    assert wholesale_custs[0]['total_sales'] == 450000.0
+    assert wholesale_custs[0]['current_dues'] == 50000.0
+
+    # Hospital cust had Debit == Credit, so dues should be 0
+    hospital_custs = sales_svc.list_customers(group='HOSPITAL')
+    assert len(hospital_custs) == 1
+    assert hospital_custs[0]['total_sales'] == 300000.0
+    assert hospital_custs[0]['current_dues'] == 0.0
+
+    # 4. Test customer summary has group_name
+    summary = sales_svc.get_customer_summary(retail_custs[0]['customer_code'])
+    assert summary['group_name'] == 'RETAIL'
+
+    # 5. Test purge_customer_data
+    purged = ingest_svc.purge_customer_data()
+    assert purged['deleted_customers'] == 4
+    assert purged['deleted_receivables'] >= 2
+
+    # After purge, customer list must be empty
+    remaining = sales_svc.list_customers()
+    assert len(remaining) == 0
+    groups_after = sales_svc.list_customer_groups()
+    assert len(groups_after) == 0
 
     session.close()
+

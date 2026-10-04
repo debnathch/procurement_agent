@@ -146,6 +146,34 @@ class IngestionService:
             'deleted_proposals': del_prop,
         }
 
+    def purge_customer_data(self) -> dict[str, int]:
+        """
+        Clears all customer master, customer receivables, and customer sales data from the database.
+        """
+        del_recv = self.db.execute(delete(CustomerReceivable)).rowcount
+        del_cust = self.db.execute(delete(Customer)).rowcount
+        del_sales = self.db.execute(delete(SalesHistory).where(SalesHistory.customer_code.is_not(None))).rowcount
+        self.db.commit()
+
+        audit(
+            self.db,
+            event_type='CUSTOMER_DATABASE_PURGED',
+            actor='user-action',
+            entity_type='customers',
+            entity_id='customer_tables',
+            details={
+                'deleted_customers': del_cust,
+                'deleted_receivables': del_recv,
+                'deleted_sales': del_sales,
+            },
+        )
+        self.db.commit()
+        return {
+            'deleted_customers': del_cust,
+            'deleted_receivables': del_recv,
+            'deleted_sales': del_sales,
+        }
+
     def _sync_reorder_from_sales(self) -> int:
         """
         Post-upload sync: for every product that has sales history, recalculate

@@ -26,13 +26,21 @@ class SalesIntelligenceService:
     def __init__(self, db: Session):
         self.db = db
 
-    def list_customers(self, search: Optional[str] = None, limit: int = 500) -> list[dict[str, Any]]:
+    def list_customer_groups(self) -> list[str]:
+        """Returns distinct customer groups/categories in the database."""
+        stmt = select(Customer.group_name).where(Customer.group_name.is_not(None)).distinct()
+        groups = [g for g in self.db.scalars(stmt).all() if g and str(g).strip()]
+        return sorted(list(set(groups)))
+
+    def list_customers(self, search: Optional[str] = None, group: Optional[str] = None, limit: int = 500) -> list[dict[str, Any]]:
         """
         Retrieves all customers with aggregated total sales and current dues.
         If no Customer records exist yet, synthesizes customer list from sales_history.
         """
         now = datetime.utcnow()
         stmt = select(Customer)
+        if group and str(group).strip() and str(group).strip() != "All":
+            stmt = stmt.where(Customer.group_name == str(group).strip())
         if search:
             s_clean = f"%{search.strip().lower()}%"
             stmt = stmt.where(
@@ -80,6 +88,7 @@ class SalesIntelligenceService:
                 results.append({
                     'customer_code': c.customer_code,
                     'customer_name': c.customer_name,
+                    'group_name': getattr(c, 'group_name', None) or 'General',
                     'district': c.district or 'General',
                     'salesperson': c.salesperson or 'Unassigned',
                     'credit_limit': c.credit_limit or 0.0,
@@ -255,6 +264,7 @@ class SalesIntelligenceService:
         return {
             'customer_code': customer_code,
             'customer_name': cust_name,
+            'group_name': getattr(customer, 'group_name', None) or 'General',
             'district': district,
             'salesperson': salesperson,
             'credit_limit': credit_limit,
