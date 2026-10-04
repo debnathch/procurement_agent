@@ -73,17 +73,18 @@ class SalesIntelligenceService:
                     CustomerReceivable.customer_code,
                     func.sum(CustomerReceivable.outstanding_amount),
                     func.count(CustomerReceivable.id),
-                    func.max(CustomerReceivable.days_due)
+                    func.max(CustomerReceivable.days_due),
+                    func.sum(CustomerReceivable.adjusted_amount)
                 )
                 .where(CustomerReceivable.customer_code.in_(c_codes))
                 .group_by(CustomerReceivable.customer_code)
             ).all()
-            dues_map = {row[0]: (row[1] or 0.0, row[2] or 0, row[3] or 0) for row in dues_q}
+            dues_map = {row[0]: (row[1] or 0.0, row[2] or 0, row[3] or 0, row[4] or 0.0) for row in dues_q}
 
             results = []
             for c in customers:
                 s_tot, s_max_dt, s_cnt = sales_map.get(c.customer_code, (0.0, None, 0))
-                d_tot, d_cnt, d_max_days = dues_map.get(c.customer_code, (0.0, 0, 0))
+                d_tot, d_cnt, d_max_days, cr_tot = dues_map.get(c.customer_code, (0.0, 0, 0, 0.0))
 
                 results.append({
                     'customer_code': c.customer_code,
@@ -95,6 +96,9 @@ class SalesIntelligenceService:
                     'status': c.status or 'ACTIVE',
                     'total_sales': round(s_tot, 2),
                     'current_dues': round(d_tot, 2),
+                    'company_payable': round(cr_tot, 2),
+                    'credit_amount': round(cr_tot, 2),
+                    'net_receivable': round(d_tot - cr_tot, 2),
                     'total_orders': s_cnt,
                     'last_order_date': s_max_dt.strftime('%d-%b-%Y') if s_max_dt else 'No Orders',
                     'oldest_due_days': d_max_days,
@@ -123,12 +127,16 @@ class SalesIntelligenceService:
             results.append({
                 'customer_code': code,
                 'customer_name': name,
+                'group_name': 'General',
                 'district': 'West Bengal',
                 'salesperson': 'Sales Team',
                 'credit_limit': 100000.0,
                 'status': 'ACTIVE',
                 'total_sales': round(tot, 2),
                 'current_dues': 0.0,
+                'company_payable': 0.0,
+                'credit_amount': 0.0,
+                'net_receivable': 0.0,
                 'total_orders': cnt,
                 'last_order_date': max_dt.strftime('%d-%b-%Y') if max_dt else 'No Orders',
                 'oldest_due_days': 0,
@@ -215,6 +223,7 @@ class SalesIntelligenceService:
         ).all()
 
         total_outstanding = 0.0
+        total_payable = 0.0
         oldest_due_days = 0
         oldest_due_invoice = None
 
@@ -229,15 +238,17 @@ class SalesIntelligenceService:
         pending_invoices = []
         for r in receivables:
             bal = r.outstanding_amount or 0.0
-            if bal <= 0:
+            payable = r.adjusted_amount or 0.0
+            total_payable += payable
+            if bal <= 0 and payable <= 0:
                 continue
             total_outstanding += bal
             days = r.days_due or 0
-            if days > oldest_due_days:
+            if bal > 0 and days > oldest_due_days:
                 oldest_due_days = days
                 oldest_due_invoice = r.invoice_no
 
-            # Ageing categorization
+            # Ageing categorization (for customer dues)
             if days <= 0:
                 ageing['current'] += bal
             elif days <= 30:
@@ -255,6 +266,8 @@ class SalesIntelligenceService:
                 'due_date': r.due_date.strftime('%d-%b-%Y') if r.due_date else 'N/A',
                 'invoice_amount': round(r.invoice_amount or 0.0, 2),
                 'outstanding_amount': round(bal, 2),
+                'company_payable': round(payable, 2),
+                'credit_amount': round(payable, 2),
                 'days_due': days,
                 'ageing_bucket': r.ageing_bucket or ('Overdue' if days > 0 else 'Current'),
             })
@@ -274,6 +287,10 @@ class SalesIntelligenceService:
             'total_orders': total_orders,
             'average_order_value': round(avg_order_val, 2),
             'current_outstanding': round(total_outstanding, 2),
+            'current_dues': round(total_outstanding, 2),
+            'company_payable': round(total_payable, 2),
+            'credit_amount': round(total_payable, 2),
+            'net_receivable': round(total_outstanding - total_payable, 2),
             'outstanding_invoices_count': len(pending_invoices),
             'oldest_due_invoice': oldest_due_invoice or 'None',
             'oldest_due_days': oldest_due_days,

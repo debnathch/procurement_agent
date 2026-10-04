@@ -190,9 +190,16 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         name = c['customer_name']
         dist = c.get('district', 'General')
         grp = c.get('group_name') or 'General'
-        tot_s = c.get('total_sales', 0.0)
         dues = c.get('current_dues', 0.0)
-        label = f"{name} ({code}) — [{grp}] | Sales: ₹{tot_s:,.0f} | Dues: ₹{dues:,.0f}"
+        cr = c.get('company_payable', c.get('credit_amount', 0.0))
+        tot_s = c.get('total_sales', 0.0)
+
+        label_parts = [f"{name} [{grp}]", f"Dues: ₹{dues:,.2f}"]
+        if cr > 0:
+            label_parts.append(f"Liable to Pay: ₹{cr:,.2f}")
+        if tot_s > 0:
+            label_parts.append(f"Sales: ₹{tot_s:,.2f}")
+        label = " | ".join(label_parts)
         cust_options.append(label)
         cust_code_map[label] = code
 
@@ -243,31 +250,65 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     """, unsafe_allow_html=True)
 
     # Section 6: Key Financial Summary Metrics
+    current_dues = summary.get('current_dues', summary.get('current_outstanding', 0.0))
+    company_payable = summary.get('company_payable', summary.get('credit_amount', 0.0))
+    net_position = summary.get('net_receivable', current_dues - company_payable)
+    oldest_days = summary.get('oldest_due_days', 0)
+    oldest_inv = summary.get('oldest_due_invoice', 'None')
+
     tot_sales = summary.get('total_sales', 0.0)
-    current_dues = summary.get('current_outstanding', 0.0)
     sales_30d = summary.get('sales_30d', 0.0)
     sales_90d = summary.get('sales_90d', 0.0)
     total_orders = summary.get('total_orders', 0)
-    oldest_days = summary.get('oldest_due_days', 0)
-    oldest_inv = summary.get('oldest_due_invoice', 'None')
     last_order_dt = summary.get('last_order_date', 'N/A')
     days_since_order = summary.get('days_since_last_order', 'N/A')
     avg_order_val = summary.get('average_order_value', 0.0)
 
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    with col_f1:
-        st.metric("Total Historical Sales", f"₹{tot_sales:,.2f}")
-        st.metric("Sales (Last 30 Days)", f"₹{sales_30d:,.2f}")
-    with col_f2:
-        st.metric("Current Outstanding Dues", f"₹{current_dues:,.2f}")
-        st.metric("Sales (Last 90 Days)", f"₹{sales_90d:,.2f}")
-    with col_f3:
+    st.markdown("#### 💰 Financial Ledger & Dues Position")
+    col_bal1, col_bal2, col_bal3, col_bal4 = st.columns(4)
+    with col_bal1:
+        st.metric(
+            "Customer Dues (Debit)",
+            f"₹{current_dues:,.2f}",
+            help="Outstanding dues customer owes to the company (imported from Debit column)"
+        )
+    with col_bal2:
+        st.metric(
+            "Company Liable to Pay (Credit)",
+            f"₹{company_payable:,.2f}",
+            help="Credit balance / amount company is liable to pay or adjust (imported from Credit column)"
+        )
+    with col_bal3:
+        if net_position >= 0:
+            st.metric(
+                "Net Position (Receivable)",
+                f"₹{net_position:,.2f}",
+                delta=f"+₹{net_position:,.2f} Net Due" if net_position > 0 else "Balanced (₹0.00)",
+                delta_color="normal",
+                help="Net customer dues = Debit Dues − Credit Liability"
+            )
+        else:
+            st.metric(
+                "Net Position (Payable)",
+                f"₹{abs(net_position):,.2f}",
+                delta=f"-₹{abs(net_position):,.2f} Company Liable",
+                delta_color="inverse",
+                help="Net company liability = Credit Liability − Debit Dues"
+            )
+    with col_bal4:
         due_str = f"{oldest_days} Days" if oldest_days > 0 else "0 Days"
-        st.metric("Oldest Due Age", due_str, help=f"Oldest Invoice: {oldest_inv}")
-        st.metric("Total Invoices / Orders", total_orders)
-    with col_f4:
-        st.metric("Last Order Date", str(last_order_dt), help=f"Days Since Last Order: {days_since_order}")
-        st.metric("Average Order Value", f"₹{avg_order_val:,.2f}")
+        st.metric("Oldest Due Age", due_str, help=f"Oldest Due Voucher/Invoice: {oldest_inv}")
+
+    st.markdown("#### 📊 Sales Activity & Turnover")
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    with col_s1:
+        st.metric("Total Historical Sales", f"₹{tot_sales:,.2f}", help="Total billed sales turnover from sales invoices")
+    with col_s2:
+        st.metric("Sales (Last 30 Days)", f"₹{sales_30d:,.2f}")
+    with col_s3:
+        st.metric("Sales (Last 90 Days)", f"₹{sales_90d:,.2f}")
+    with col_s4:
+        st.metric("Total Orders / Invoices", total_orders, help=f"Last Order Date: {last_order_dt} ({days_since_order} days ago)")
 
     st.markdown("---")
 
@@ -276,7 +317,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         "⚠️ Near-Expiry Opportunities",
         "🎯 Reorder Suggestions",
         "📜 Purchase History",
-        "💳 Bill-Wise Outstanding Ageing"
+        "💳 Customer Dues & Liabilities"
     ])
 
     # TAB 1: Near-Expiry Opportunities
@@ -375,9 +416,12 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             }, inplace=True)
             st.dataframe(df_orders, use_container_width=True, hide_index=True)
 
-    # TAB 4: Outstanding Ageing
+    # TAB 4: Customer Dues & Liabilities Ageing
     with tab_ageing:
-        st.subheader("💳 Bill-Wise Outstanding Ageing Breakdown")
+        st.subheader("💳 Customer Dues (Debit) & Company Liability (Credit) Breakdown")
+        st.markdown("""
+        Ageing breakdown of customer dues (**Debit**) and credit balances the company is liable to pay (**Credit**).
+        """)
         ageing = summary.get('ageing', {})
 
         col_a1, col_a2, col_a3, col_a4, col_a5 = st.columns(5)
@@ -395,16 +439,19 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         st.markdown("---")
         pending_invs = summary.get('pending_invoices', [])
         if not pending_invs:
-            st.success("🎉 No outstanding dues or unpaid invoices pending for this customer!")
+            st.success("🎉 No customer dues or liability records found for this customer!")
         else:
             df_invs = pd.DataFrame(pending_invs)
-            df_invs.rename(columns={
-                'invoice_no': 'Invoice Number',
+            rename_map = {
+                'invoice_no': 'Voucher / Bill No',
                 'invoice_date': 'Bill Date',
                 'due_date': 'Due Date',
-                'invoice_amount': 'Bill Amount (₹)',
-                'outstanding_amount': 'Pending Dues (₹)',
+                'outstanding_amount': 'Customer Dues / Debit (₹)',
+                'company_payable': 'Company Liable to Pay / Credit (₹)',
                 'days_due': 'Days Overdue',
                 'ageing_bucket': 'Ageing Bracket',
-            }, inplace=True)
-            st.dataframe(df_invs, use_container_width=True, hide_index=True)
+            }
+            display_cols = [c for c in ['invoice_no', 'invoice_date', 'due_date', 'outstanding_amount', 'company_payable', 'days_due', 'ageing_bucket'] if c in df_invs.columns]
+            df_display = df_invs[display_cols].copy()
+            df_display.rename(columns=rename_map, inplace=True)
+            st.dataframe(df_display, use_container_width=True, hide_index=True)

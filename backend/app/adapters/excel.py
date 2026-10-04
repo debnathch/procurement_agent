@@ -85,16 +85,13 @@ COLUMN_ALIASES: dict[str, list[str]] = {
         'saleamount', 'totalbilling', 'billing', 'totalsaleamt', 'salesamount',
         'grosssales', 'totalbills', 'total_sales', 'total_sale', 'tot_sales',
         'tot_sale', 'totalsalestillnow', 'saleamt', 'totalbill',
-        'salesfigure', 'turnoveramt', 'totalsalesvalue',
-        # Ledger-specific: Debit column = total invoiced amount
-        'debit', 'dramt', 'dramount', 'dr',
-        # Also common in party-wise summary
-        'totaldebit', 'totaldr', 'drbalance', 'drbal'
+        'salesfigure', 'turnoveramt', 'totalsalesvalue'
     ],
     'credit_amount': [
-        # Ledger-specific: Credit column = payments received
+        # Credit column = company liability / amount company is liable to pay
         'credit', 'cramt', 'cramount', 'cr',
         'totalcredit', 'totalcr', 'crbalance', 'crbal',
+        'companyliability', 'liability', 'liabletopay', 'advance',
         'paymentreceived', 'received', 'paidinward', 'paymentinward',
         'paymentin', 'receipts', 'receipt', 'cashreceived'
     ],
@@ -107,14 +104,15 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     'remarks': ['remarks', 'remark', 'certification', 'notes'],
     'place': ['place', 'location', 'city', 'station'],
     'balance_outstanding': [
+        # Debit column in MARG customer ledger represents customer dues
+        'debit', 'dramt', 'dramount', 'dr', 'totaldebit', 'totaldr', 'drbalance', 'drbal',
         'balanceoutstanding', 'baloutstanding', 'dueoutstanding', 'outstanding', 'balance',
         'balamt', 'pendingamount', 'dueamount', 'dueamt', 'dues', 'due', 'pendingamt', 'netdue',
         'totaldues', 'totaldue', 'totaloutstanding', 'closingbalance', 'clbal', 'clbalance',
         'currentbalance', 'currbal', 'balanceamount', 'bal', 'netbalance', 'pendingdue',
         'pendingdues', 'duebal', 'outstandings', 'totalduestillnow',
         'clbaldr', 'currbalance', 'duestillnow',
-        # Net outstanding = debit - credit balance
-        'netamountdue', 'netdue', 'closingdr', 'closingdebit', 'netdebit',
+        'netamountdue', 'closingdr', 'closingdebit', 'netdebit',
         'closingbaldr', 'drnetbalance'
     ],
     'op_due': ['opdue', 'openingdue'],
@@ -1411,46 +1409,50 @@ class MargExcelParser:
                     code = f"{base_code[:20]}-{cnt}"
                     cnt += 1
 
+            # Debit column in customer ledger represents Customer Dues (amount customer owes to company)
+            debit_dues = _parse_float(
+                row.get('balance_outstanding') or
+                row.get('debit') or
+                row.get('dramt') or
+                row.get('dramount') or
+                row.get('dr') or
+                row.get('due') or
+                row.get('dues') or
+                row.get('total_dues') or
+                row.get('due_amount') or
+                row.get('outstanding') or
+                row.get('outstanding_amount') or
+                row.get('balance') or
+                row.get('closing_balance') or
+                row.get('cl_bal') or
+                row.get('balamt') or
+                row.get('pending_amount') or
+                row.get('pending_due') or
+                row.get('net_due'),
+                0.0
+            )
+
+            # Credit column represents Company Liability (amount company is liable to pay to customer)
+            credit_liability = _parse_float(
+                row.get('credit_amount') or
+                row.get('credit') or
+                row.get('cramt') or
+                row.get('cramount') or
+                row.get('cr'),
+                0.0
+            )
+
+            # Total sales is ONLY extracted from explicit sales register columns (NOT from Debit)
             tot_sales = _parse_float(
                 row.get('total_sales') or
                 row.get('sale_amount') or
                 row.get('sales') or
                 row.get('turnover') or
-                row.get('total_sale') or
-                row.get('total_bill') or
-                row.get('invoice_amount') or
-                row.get('bill_amount') or
-                row.get('total_amount') or
-                row.get('amount') or
-                row.get('qty_sold'),
+                row.get('totalsale') or
+                row.get('salesturnover') or
+                row.get('turnoveramt'),
                 0.0
             )
-
-            # Credit amount = total payments received from customer (from ledger Debit/Credit format)
-            credit_received = _parse_float(row.get('credit_amount'), 0.0)
-
-            # If we have both total_sales (Debit) and credit_amount (Credit),
-            # compute the net outstanding balance = Debit - Credit
-            if tot_sales > 0 and credit_received > 0:
-                balance = max(0.0, tot_sales - credit_received)
-            else:
-                balance = _parse_float(
-                    row.get('balance_outstanding') or
-                    row.get('balance') or
-                    row.get('outstanding_amount') or
-                    row.get('outstanding') or
-                    row.get('due_amount') or
-                    row.get('due') or
-                    row.get('dues') or
-                    row.get('total_dues') or
-                    row.get('closing_balance') or
-                    row.get('cl_bal') or
-                    row.get('balamt') or
-                    row.get('pending_amount') or
-                    row.get('pending_due') or
-                    row.get('net_due'),
-                    0.0
-                )
 
             mr_name = _clean_str(row.get('salesperson') or row.get('channel') or row.get('mrname') or row.get('salesman') or 'Sales Team')
             cr_days = int(_parse_float(row.get('lead_time_days') or row.get('creditdays') or row.get('crdays'), settings.default_lead_time_days))
@@ -1483,6 +1485,7 @@ class MargExcelParser:
                 })
                 seen_codes.add(code)
 
+            # Only append sales history if an actual sales register column was present
             if tot_sales > 0:
                 inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no')) or f"SALE-{code}"
                 out['sales_history'].append({
@@ -1498,8 +1501,9 @@ class MargExcelParser:
                     'amount': tot_sales,
                 })
 
-            if balance > 0:
-                inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no') or row.get('voucherno') or row.get('billnumber')) or f"BAL-{code}"
+            # Record customer receivable: Debit = Customer Dues, Credit = Amount company is liable to pay
+            if debit_dues > 0 or credit_liability > 0:
+                inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no') or row.get('voucherno') or row.get('billnumber')) or f"DUE-{code}"
                 days_val = int(_parse_float(row.get('days_due') or row.get('days') or row.get('duedays') or row.get('age') or row.get('overdue') or row.get('lead_time_days'), 0.0))
                 bucket = (
                     'Current' if days_val <= 0 else
@@ -1514,10 +1518,9 @@ class MargExcelParser:
                     'invoice_no': inv_no,
                     'invoice_date': now_dt,
                     'due_date': now_dt + timedelta(days=max(1, cr_days)),
-                    # invoice_amount = total billing (Debit), adjusted = payments (Credit)
-                    'invoice_amount': tot_sales if tot_sales > 0 else balance,
-                    'adjusted_amount': credit_received if credit_received > 0 else max(0.0, (tot_sales if tot_sales > 0 else balance) - balance),
-                    'outstanding_amount': balance,
+                    'invoice_amount': debit_dues,         # Customer Dues (Debit)
+                    'adjusted_amount': credit_liability,   # Amount company is liable to pay (Credit)
+                    'outstanding_amount': debit_dues,     # Customer Dues (Debit)
                     'days_due': days_val,
                     'ageing_bucket': bucket,
                 })

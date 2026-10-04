@@ -205,23 +205,31 @@ def test_customer_group_ingestion_filtering_and_purge():
     wholesale_custs = sales_svc.list_customers(group='WHOLESALE')
     assert len(wholesale_custs) == 1
     assert wholesale_custs[0]['customer_name'] == 'METRO PHARMA WHOLESALE'
-    assert wholesale_custs[0]['total_sales'] == 450000.0
-    assert wholesale_custs[0]['current_dues'] == 50000.0
+    assert wholesale_custs[0]['current_dues'] == 450000.0       # Debit is Customer Dues
+    assert wholesale_custs[0]['company_payable'] == 400000.0    # Credit is Company Liability
+    assert wholesale_custs[0]['net_receivable'] == 50000.0      # Net = Debit - Credit
+    assert wholesale_custs[0]['total_sales'] == 0.0             # Debit is not sales
 
-    # Hospital cust had Debit == Credit, so dues should be 0
+    # Hospital cust had Debit 300,000 and Credit 300,000
     hospital_custs = sales_svc.list_customers(group='HOSPITAL')
     assert len(hospital_custs) == 1
-    assert hospital_custs[0]['total_sales'] == 300000.0
-    assert hospital_custs[0]['current_dues'] == 0.0
+    assert hospital_custs[0]['current_dues'] == 300000.0
+    assert hospital_custs[0]['company_payable'] == 300000.0
+    assert hospital_custs[0]['net_receivable'] == 0.0
+    assert hospital_custs[0]['total_sales'] == 0.0
 
-    # 4. Test customer summary has group_name
+    # 4. Test customer summary has group_name and dues/liability fields
     summary = sales_svc.get_customer_summary(retail_custs[0]['customer_code'])
     assert summary['group_name'] == 'RETAIL'
+    assert summary['current_dues'] == 120000.0
+    assert summary['company_payable'] == 90000.0
+    assert summary['net_receivable'] == 30000.0
+    assert summary['total_sales'] == 0.0
 
     # 5. Test purge_customer_data
     purged = ingest_svc.purge_customer_data()
     assert purged['deleted_customers'] == 4
-    assert purged['deleted_receivables'] >= 2
+    assert purged['deleted_receivables'] == 4
 
     # After purge, customer list must be empty
     remaining = sales_svc.list_customers()
@@ -274,6 +282,9 @@ def test_marg_ledger_588_customers_ingestion_and_group_filtering():
         assert len(cat_custs) == expected_count
         for c in cat_custs:
             assert c['group_name'] == cat
+            assert c['current_dues'] > 0
+            assert c['company_payable'] > 0
+            assert c['total_sales'] == 0.0
 
     session.close()
 
