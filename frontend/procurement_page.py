@@ -12,6 +12,11 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta
 
+try:
+    from backend.app.core.config import settings
+except ImportError:
+    settings = None
+
 def is_excluded_product(name: str) -> bool:
     if not name:
         return True
@@ -1056,7 +1061,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
     
                     # Compute FEFO Expiry Status for every batch
                     now_dt = datetime.utcnow()
-                    horizon_days = int(settings.expiry_risk_horizon_days if settings else 180)
+                    horizon_days = int(getattr(settings, 'expiry_risk_horizon_days', 180)) if settings else 180
                     horizon_dt = now_dt + timedelta(days=horizon_days)
     
                     def calc_batch_fefo(exp_val):
