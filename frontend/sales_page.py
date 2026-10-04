@@ -50,10 +50,11 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         col_up1, col_up2 = st.columns([2, 1])
         with col_up1:
             sales_file = st.file_uploader(
-                "Select MARG Sales Register, Customer Master, or Bill-wise Outstanding (.xlsx, .xls, .csv)",
+                "Select MARG Customer Master / Ledger (.xlsx, .xls, .csv) or Party-Wise Individual Sales Ledger",
                 type=["xlsx", "xls", "csv"],
                 key="sales_uploader_file"
             )
+            st.caption("💡 **Customer Master Ledger**: Populates Customer Master, Customer Dues (Debit), and Company Liable to Pay (Credit). | **Party-Wise Ledger**: Populates individual transactions, product sales, turnover, and reorder intelligence.")
             col_f1, col_f2 = st.columns([1, 1])
             with col_f1:
                 do_upload = st.button("🚀 Ingest MARG Data", type="primary", key="btn_ingest_sales", use_container_width=True)
@@ -194,12 +195,10 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         cr = c.get('company_payable', c.get('credit_amount', 0.0))
         tot_s = c.get('total_sales', 0.0)
 
-        label_parts = [f"{name} [{grp}]", f"Dues: ₹{dues:,.2f}"]
-        if cr > 0:
-            label_parts.append(f"Liable to Pay: ₹{cr:,.2f}")
+        # Customer Dues is populated from Debit, Liable to Pay from Credit
+        label = f"{name} [{grp}] | Dues (Debit): ₹{dues:,.2f} | Liable to Pay (Credit): ₹{cr:,.2f}"
         if tot_s > 0:
-            label_parts.append(f"Sales: ₹{tot_s:,.2f}")
-        label = " | ".join(label_parts)
+            label += f" | Sales: ₹{tot_s:,.2f}"
         cust_options.append(label)
         cust_code_map[label] = code
 
@@ -299,16 +298,19 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         due_str = f"{oldest_days} Days" if oldest_days > 0 else "0 Days"
         st.metric("Oldest Due Age", due_str, help=f"Oldest Due Voucher/Invoice: {oldest_inv}")
 
-    st.markdown("#### 📊 Sales Activity & Turnover")
+    st.markdown("#### 📊 Sales Activity & Turnover *(Populated via Party-Wise Individual Ledger)*")
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
     with col_s1:
-        st.metric("Total Historical Sales", f"₹{tot_sales:,.2f}", help="Total billed sales turnover from sales invoices")
+        st.metric("Total Historical Sales", f"₹{tot_sales:,.2f}", help="Total billed sales turnover from party-wise sales ledger")
     with col_s2:
         st.metric("Sales (Last 30 Days)", f"₹{sales_30d:,.2f}")
     with col_s3:
         st.metric("Sales (Last 90 Days)", f"₹{sales_90d:,.2f}")
     with col_s4:
         st.metric("Total Orders / Invoices", total_orders, help=f"Last Order Date: {last_order_dt} ({days_since_order} days ago)")
+
+    if total_orders == 0 and tot_sales == 0.0:
+        st.info("ℹ️ **Party-Wise Individual Ledger Pending**: Sales figures, order volume, and transaction history will be populated when this customer's party-wise individual ledger (with transaction dates, invoice numbers, products, and sales figures) is uploaded.")
 
     st.markdown("---")
 
@@ -329,7 +331,9 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         """)
 
         near_opps = recommendations.get('near_expiry_opportunities', [])
-        if not near_opps:
+        if total_orders == 0:
+            st.info("ℹ️ **Party-Wise Individual Ledger Pending**: Near-expiry product opportunities match against products this customer historically purchases. Upload this customer's party-wise individual sales ledger to activate.")
+        elif not near_opps:
             st.info("✅ No near-expiry products currently matching this customer's historical purchasing profile.")
         else:
             for opp in near_opps:
@@ -375,7 +379,9 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     with tab_reorders:
         st.subheader("🎯 Regular Reorder Candidates ('What to Ask Today')")
         reorders = recommendations.get('regular_reorders', [])
-        if not reorders:
+        if total_orders == 0:
+            st.info("ℹ️ **Party-Wise Individual Ledger Pending**: Reorder frequency, order patterns, and suggested replenishment quantities are calculated from the customer's individual sales transaction history.")
+        elif not reorders:
             st.info("No reorders currently due based on expected reorder cycles.")
         else:
             df_reorder = pd.DataFrame([
@@ -401,7 +407,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         st.subheader("📜 Historical Sales Transactions")
         recent_orders = summary.get('recent_orders', [])
         if not recent_orders:
-            st.info("No recorded historical sales lines found for this customer.")
+            st.info("ℹ️ **No Party-Wise Individual Ledger Uploaded Yet**: Each transaction, invoice number, product sale, quantity sold, rate, and amount will be displayed here once this party's individual ledger is ingested.")
         else:
             df_orders = pd.DataFrame(recent_orders)
             df_orders.rename(columns={

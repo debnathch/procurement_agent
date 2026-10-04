@@ -289,3 +289,97 @@ def test_marg_ledger_588_customers_ingestion_and_group_filtering():
     session.close()
 
 
+def test_party_wise_individual_ledger_populates_transactions_and_product_sales():
+    """
+    Validates the end-to-end multi-tier model:
+    1. Customer Master Ledger: Debit populates Customer Dues, Credit populates Company Liable to Pay.
+       Other placeholders (total sales, transactions, products) remain 0 / unpopulated.
+    2. Party-Wise Individual Ledger: Ingests each transaction, product name, qty, rate, and sales figure
+       to populate Total Historical Sales, Order Count, and Purchase History transactions.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # Step 1: Upload Customer Master Ledger
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'ROYAL PHARMA DISTRIBUTORS',
+            'Group': 'RETAIL PHARMACY',
+            'Debit': 65000.0,
+            'Credit': 15000.0,
+            'District': 'Kolkata Central',
+        }
+    ])
+    buf_master = io.BytesIO()
+    master_df.to_excel(buf_master, index=False)
+
+    ingest_svc = IngestionService(session)
+    ingest_svc.ingest_excel(buf_master.getvalue(), filename='Customer_Master_Ledger.xlsx')
+
+    sales_svc = SalesIntelligenceService(session)
+    custs = sales_svc.list_customers()
+    assert len(custs) == 1
+    royal = custs[0]
+    assert royal['customer_name'] == 'ROYAL PHARMA DISTRIBUTORS'
+    # Only Customer Dues is Debit, and Company Liable to Pay is Credit
+    assert royal['current_dues'] == 65000.0
+    assert royal['company_payable'] == 15000.0
+    assert royal['net_receivable'] == 50000.0
+    # Other placeholders are awaiting the party-wise ledger
+    assert royal['total_sales'] == 0.0
+    assert royal['total_orders'] == 0
+
+    summary_before = sales_svc.get_customer_summary(royal['customer_code'])
+    assert summary_before['current_dues'] == 65000.0
+    assert summary_before['company_payable'] == 15000.0
+    assert summary_before['total_sales'] == 0.0
+    assert summary_before['total_orders'] == 0
+    assert len(summary_before['recent_orders']) == 0
+
+    # Step 2: Upload Party-Wise Individual Ledger with actual transactions and product sales
+    party_ledger_df = pd.DataFrame([
+        {
+            'Date': '15/05/2026',
+            'Party Name': 'ROYAL PHARMA DISTRIBUTORS',
+            'Particulars': 'PARACET-650 MG TABLET',
+            'Invoice No': 'INV-2026-101',
+            'Qty': 100.0,
+            'Rate': 20.0,
+            'Debit': 2000.0,
+        },
+        {
+            'Date': '28/06/2026',
+            'Party Name': 'ROYAL PHARMA DISTRIBUTORS',
+            'Particulars': 'AMOXY-500 MG CAPSULE',
+            'Invoice No': 'INV-2026-102',
+            'Qty': 50.0,
+            'Rate': 80.0,
+            'Debit': 4000.0,
+        },
+    ])
+    buf_party = io.BytesIO()
+    party_ledger_df.to_excel(buf_party, index=False)
+
+    stats = ingest_svc.ingest_excel(buf_party.getvalue(), filename='Royal_Pharma_Party_Ledger.xlsx')
+    assert stats['sales_inserted'] == 2
+
+    # Step 3: Verify the UI placeholders are now populated from the party-wise ledger
+    summary_after = sales_svc.get_customer_summary(royal['customer_code'])
+    # Customer Dues & Liable to Pay remain untouched from Master Ledger
+    assert summary_after['current_dues'] == 65000.0
+    assert summary_after['company_payable'] == 15000.0
+    assert summary_after['net_receivable'] == 50000.0
+    # Sales figures and transactions are now populated from Party Ledger
+    assert summary_after['total_sales'] == 6000.0
+    assert summary_after['total_orders'] == 2
+    assert len(summary_after['recent_orders']) == 2
+
+    # Verify transaction details in purchase history
+    prod_names = {tx['product_name'] for tx in summary_after['recent_orders']}
+    assert 'PARACET-650 MG TABLET' in prod_names
+    assert 'AMOXY-500 MG CAPSULE' in prod_names
+
+    session.close()
+
+

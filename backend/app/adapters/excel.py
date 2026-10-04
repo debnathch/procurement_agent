@@ -906,18 +906,25 @@ class MargExcelParser:
             'expiry_date' in df_renamed.columns
         )
 
-        is_sales_report = not (has_customer_cols and not has_stock_cols) and (
-            any(kw in banner_text for kw in (
-                'sales summary', 'sales report', 'sale report', 'sale summary',
-                'sale statement', 'sales statement', 'sale register', 'sales register',
-                'item wise sale', 'party wise sale', 'sales analysis', 'sale analysis',
-                'sale book', 'sales book', 'daily sale', 'monthly sale'
-            )) or
-            any(kw in file_lower for kw in ('sales', 'sale', 'billing', 'dispatch')) or
-            any(kw in sheet_lower for kw in ('sales', 'sale', 'billing', 'dispatch')) or
+        has_product_transaction_cols = (
             has_explicit_sales_cols or
             has_general_sales_cols or
-            ('sale_date' in df_renamed.columns and 'qty_sold' in df_renamed.columns)
+            ('sale_date' in df_renamed.columns and 'qty_sold' in df_renamed.columns) or
+            (any(c in cleaned_col_names for c in ['itemdescription', 'particulars', 'itemname', 'productname']) and
+             any(c in cleaned_col_names for c in ['quantity', 'qty', 'qtysold', 'soldqty', 'billedqty', 'totalqty']))
+        )
+
+        is_sales_report = has_product_transaction_cols or (
+            not (has_customer_cols and not has_stock_cols) and (
+                any(kw in banner_text for kw in (
+                    'sales summary', 'sales report', 'sale report', 'sale summary',
+                    'sale statement', 'sales statement', 'sale register', 'sales register',
+                    'item wise sale', 'party wise sale', 'sales analysis', 'sale analysis',
+                    'sale book', 'sales book', 'daily sale', 'monthly sale'
+                )) or
+                any(kw in file_lower for kw in ('sales', 'sale', 'billing', 'dispatch')) or
+                any(kw in sheet_lower for kw in ('sales', 'sale', 'billing', 'dispatch'))
+            )
         )
 
         is_purchase_report = (
@@ -1064,16 +1071,30 @@ class MargExcelParser:
 
         for c in df.columns:
             c_norm = _clean_alpha(c)
-            if c_norm in ('partyname', 'customername', 'party', 'customer', 'accountname', 'debtorname'):
+            if c_norm in ('partyname', 'customername', 'party', 'customer', 'accountname', 'debtorname', 'ledger', 'ledgername', 'partyledger'):
                 cust_name_col = c
-            elif c_norm in ('partycode', 'customercode', 'custcode', 'accountcode', 'debtorcode'):
+            elif c_norm in ('partycode', 'customercode', 'custcode', 'accountcode', 'debtorcode', 'ledgercode'):
                 cust_code_col = c
-            elif c_norm in ('invoiceno', 'billno', 'voucherno', 'invno', 'billnumber'):
+            elif c_norm in ('invoiceno', 'billno', 'voucherno', 'invno', 'billnumber', 'vchno', 'voucher', 'bill'):
                 inv_no_col = c
-            elif c_norm in ('invoicedate', 'billdate', 'date', 'saledate', 'vchdate'):
+            elif c_norm in ('invoicedate', 'billdate', 'date', 'saledate', 'vchdate', 'txndate'):
                 date_col = c
-            elif c_norm in ('netamount', 'billamount', 'amount', 'totalamount', 'netamt', 'total'):
+            elif c_norm in ('netamount', 'billamount', 'amount', 'totalamount', 'netamt', 'total', 'debit', 'dramt', 'debitamount'):
                 amt_col = c
+
+        # If customer name is not a column, check banner for individual party ledger header
+        banner_party = None
+        if not cust_name_col and banner_text:
+            m_party = re.search(
+                r'(?:party|ledger|customer|account)\s*(?:of|name|account)?\s*[:\-]\s*([A-Za-z0-9\s\.\&\/\-\(\)]+)',
+                banner_text,
+                re.IGNORECASE
+            )
+            if m_party:
+                raw_p = m_party.group(1).strip()
+                raw_p = re.split(r'[\r\n]|from|period|date', raw_p, flags=re.IGNORECASE)[0].strip()
+                if raw_p and len(raw_p) > 2 and raw_p.upper() not in ('STATEMENT', 'REPORT', 'SUMMARY'):
+                    banner_party = raw_p
 
         if not name_col:
             name_col = df.columns[0]
@@ -1091,7 +1112,7 @@ class MargExcelParser:
             rate = _parse_float(row.get(rate_col), 0.0) if rate_col else 0.0
             amt  = _parse_float(row.get(amt_col), 0.0) if amt_col else (total_sold * rate)
 
-            c_name = _clean_str(row.get(cust_name_col)) if cust_name_col else None
+            c_name = _clean_str(row.get(cust_name_col)) if cust_name_col else banner_party
             c_code = _clean_str(row.get(cust_code_col)) if cust_code_col else None
             if not c_code and c_name:
                 c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:10].upper()
@@ -1104,19 +1125,19 @@ class MargExcelParser:
 
             code = _make_stable_code(name)
 
-            # ONE row per product with actual total units sold since 1st April
-            # Daily Demand Velocity = Total Quantity Sold / Days from 1st April of current year to today
-            if total_sold > 0:
+            # Product sale line from sales report or party-wise individual ledger
+            if total_sold > 0 or amt > 0:
+                effective_qty = total_sold if total_sold > 0 else 1.0
                 out['sales_history'].append({
                     'product_code': code,
-                    'product_name': name,       # saved from ITEM DESCRIPTION column
-                    'sale_date': row_date,      # representative date or transaction date
-                    'qty_sold': round(total_sold, 4),
+                    'product_name': name,       # saved from ITEM DESCRIPTION / Particulars
+                    'sale_date': row_date,      # transaction date
+                    'qty_sold': round(effective_qty, 4),
                     'channel': 'retail',
                     'customer_code': c_code,
                     'customer_name': c_name,
-                    'invoice_no': inv_no,
-                    'rate': rate,
+                    'invoice_no': inv_no or f"TXN-{code}-{len(out['sales_history'])+1}",
+                    'rate': rate if rate > 0 else round(amt / effective_qty, 2) if effective_qty > 0 else 0.0,
                     'amount': round(amt, 2),
                 })
 
