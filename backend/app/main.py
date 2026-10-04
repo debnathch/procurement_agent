@@ -588,24 +588,14 @@ def list_promo_material(
     p_stmt = select(Product).where(Product.is_promo_material == True)
     if company and company.lower() != 'all companies':
         p_stmt = p_stmt.where(Product.company == company)
-    p_stmt = p_stmt.order_by(Product.product_name.asc())
-    products = db.scalars(p_stmt).all()
-
-    all_batches = db.scalars(select(InventoryBatch)).all()
-    batch_map = defaultdict(list)
-    for b in all_batches:
-        batch_map[b.product_code].append(b)
+    p_stmt = p_stmt.order_by(Product.product_name.asc(), Product.batch_no.asc())
+    promo_products = db.scalars(p_stmt).all()
 
     results = []
-    for p in products:
-        p_batches = batch_map.get(p.product_code, [])
-        total_on_hand = sum(b.qty_on_hand for b in p_batches)
-        batch_nos = [b.batch_no for b in p_batches if b.batch_no and b.batch_no != 'DEFAULT']
-        batch_str = ", ".join(dict.fromkeys(batch_nos)) if batch_nos else (p_batches[0].batch_no if p_batches else 'DEFAULT')
-
-        exp_dates = [b.expiry_date for b in p_batches if b.expiry_date]
-        min_exp = min(exp_dates) if exp_dates else None
-        unit_cost = p.unit_cost or (p_batches[0].unit_cost if p_batches else 0.0)
+    for p in promo_products:
+        qty = p.current_stock or 0.0
+        unit_cost = p.unit_cost or 0.0
+        exp_str = p.expiry_date.strftime('%Y-%m-%d') if p.expiry_date else 'N/A'
 
         item = {
             'product_code': p.product_code,
@@ -614,11 +604,11 @@ def list_promo_material(
             'company': p.company or 'General',
             'manufacturer': p.manufacturer or 'None (Promo)',
             'supplier_name': p.supplier_name or 'None (Promo)',
-            'batch_no': batch_str,
-            'qty_on_hand': total_on_hand,
+            'batch_no': p.batch_no or 'DEFAULT',
+            'qty_on_hand': qty,
             'unit_cost': unit_cost,
-            'total_value': round(total_on_hand * unit_cost, 2),
-            'expiry_date': min_exp.strftime('%Y-%m-%d') if min_exp else 'N/A',
+            'total_value': round(qty * unit_cost, 2),
+            'expiry_date': exp_str,
             'unit': p.unit or 'pcs',
         }
         if search:

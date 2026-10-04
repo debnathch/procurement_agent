@@ -429,7 +429,7 @@ class ProcurementAgent:
                 demand_source = 'no_history'
 
             # 2. Inventory & FEFO position
-            p_batches = batch_map.get(p_code, [])
+            p_batches = [b for b in batch_map.get(p_code, []) if not getattr(b, 'is_promo_material', False)]
             on_hand = sum(b.qty_on_hand for b in p_batches)
             # Fallback: if no inventory_batches rows, use products.current_stock
             if on_hand == 0 and (product.current_stock or 0) > 0:

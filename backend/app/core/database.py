@@ -112,6 +112,7 @@ def init_db():
             ('products', 'is_promo_material', 'BOOLEAN DEFAULT 0'),
             ('inventory_batches', 'company', 'VARCHAR(256)'),
             ('inventory_batches', 'manufacturer', 'VARCHAR(256)'),
+            ('inventory_batches', 'is_promo_material', 'BOOLEAN DEFAULT 0'),
             ('procurement_proposals', 'company', 'VARCHAR(256)'),
             ('procurement_proposals', 'manufacturer', 'VARCHAR(256)'),
             ('procurement_proposals', 'batch_numbers', 'VARCHAR(512)'),

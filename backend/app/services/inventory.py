@@ -110,6 +110,8 @@ class InventoryService:
         usable_before_expiry = 0.0
 
         for b in batches:
+            if getattr(b, 'is_promo_material', False):
+                continue
             on_hand += b.qty_on_hand
             on_order += b.qty_on_order
             if b.expiry_date:

@@ -1261,6 +1261,7 @@ class MargExcelParser:
                 'qty_on_order': qty_on_order,
                 'expiry_date': expiry_dt,
                 'unit_cost': cost_val,
+                'is_promo_material': is_promo,
             })
 
     @classmethod

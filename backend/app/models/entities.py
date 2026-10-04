@@ -93,6 +93,7 @@ class InventoryBatch(Base):
     batch_no: Mapped[str | None] = mapped_column(String(64))
     company: Mapped[str | None] = mapped_column(String(256))
     manufacturer: Mapped[str | None] = mapped_column(String(256))
+    is_promo_material: Mapped[bool] = mapped_column(Boolean, default=False)
     qty_on_hand: Mapped[float] = mapped_column(Float, default=0.0)
     qty_on_order: Mapped[float] = mapped_column(Float, default=0.0)
     expiry_date: Mapped[datetime | None] = mapped_column(DateTime)

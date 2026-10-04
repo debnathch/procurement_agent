@@ -1095,3 +1095,85 @@ def test_daily_demand_velocity_since_first_april():
     assert 'sales_since_1st_april' in src2
 
     session.close()
+
+
+def test_row_wise_promo_isolation_with_particular_batch_and_no_reorder():
+    """
+    Validates that:
+    1. Input stock rows with no manufacturer and no supplier are classified as promotional material row-wise.
+    2. In the promotional material view, only that particular batch and its stock is shown.
+    3. Legitimate medicine batches with suppliers are evaluated for replenishment / no-reorder.
+    """
+    from backend.app.adapters.excel import MargExcelParser
+    from backend.app.services.ingestion import IngestionService
+    from backend.app.agent.procurement_agent import ProcurementAgent
+    from backend.app.main import list_promo_material
+
+    # Create Excel with 3 rows for B-ROXIN: 2 with suppliers, 1 with blank supplier & mfr
+    raw_rows = [
+        {
+            'Item Code': 'A00154',
+            'Item Name': 'B-ROXIN E/D DROP 1X10ML',
+            'Batch': 'OFB-228A',
+            'Exp Date': '05/2027',
+            'Closing Stock': 86,
+            'Pur.Rate': 7.0,
+            'Supplier Name': 'CHATTERJEE ENTERPRISE',
+            'Mfr': '',
+        },
+        {
+            'Item Code': 'A00154',
+            'Item Name': 'B-ROXIN E/D DROP 1X10ML',
+            'Batch': 'OFB-235A',
+            'Exp Date': '07/2028',
+            'Closing Stock': 2106,
+            'Pur.Rate': 6.75,
+            'Supplier Name': 'PUSHKAR PHARMA SIRMOUR',
+            'Mfr': '',
+        },
+        {
+            'Item Code': 'A00154',
+            'Item Name': 'B-ROXIN E/D DROP 1X10ML',
+            'Batch': 'DEFAULT',
+            'Exp Date': '07/2026',
+            'Closing Stock': 0,
+            'Pur.Rate': 6.75,
+            'Supplier Name': '',
+            'Mfr': '',
+        },
+    ]
+    df = pd.DataFrame(raw_rows)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Stock", index=False)
+
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    ingestion = IngestionService(session)
+    ingestion.ingest_excel(buf.getvalue(), filename='STOCK.xlsx', clear_existing=True)
+
+    # 1. Check list_promo_material: only the DEFAULT promo row should be returned, with batch DEFAULT and stock 0
+    promo_results = list_promo_material(db=session)
+    assert len(promo_results) == 1
+    p_promo = promo_results[0]
+    assert p_promo['product_code'] == 'A00154'
+    assert p_promo['batch_no'] == 'DEFAULT'
+    assert p_promo['qty_on_hand'] == 0.0
+    # Must NOT include the 2192 units from OFB-228A and OFB-235A!
+    assert 'OFB-228A' not in p_promo['batch_no']
+    assert 'OFB-235A' not in p_promo['batch_no']
+
+    # 2. Check get_no_reorder_products: B-ROXIN should qualify under medicine stock (2192 units on hand)
+    agent = ProcurementAgent(session)
+    no_reorder = agent.get_no_reorder_products()
+    nr_codes = [x['product_code'] for x in no_reorder]
+    assert 'A00154' in nr_codes
+    nr_item = next(x for x in no_reorder if x['product_code'] == 'A00154')
+    # Stock on hand reflects the legitimate medicine batches: 86 + 2106 = 2192
+    assert nr_item['stock_on_hand'] == 2192.0
+    assert nr_item['net_need'] <= 0
+
+    session.close()
+
