@@ -553,20 +553,24 @@ def parse_expiry_date(val: Any) -> datetime | None:
     return None
 
 
-PROMO_NAME_KEYWORDS: tuple[str, ...] = (
-    'BAG', 'DIARY', 'SHIRT', 'CALENDER', 'CALENDAR', 'FOIL', 'BOX', 'PLAT CHARGES', 'PRODUCT',
-    'VISUAL-AID', 'PACKING', 'PEN-', 'PILLOW', 'PAD-', 'BANNER', 'STANDY', 'PAPER WEIGHT', 'CARTON'
+PROMO_NAME_REGEX = re.compile(
+    r'\b(?:BAG|DIARY|SHIRT|CALENDER|CALENDAR|FOIL|BOX|PLAT\s*CHARGES|PRODUCT|VISUAL[\-\s]*AID|PACKING|PILLOW|BANNER|STANDY|PAPER\s*WEIGHT|CARTON)\b'
+    r'|\bPEN[\-\s]'
+    r'|\bPAD[\-\s]',
+    re.IGNORECASE
 )
 
 
 def is_promotional_material(name: str, has_mfr: bool = False, has_sup: bool = False) -> bool:
     """
     Determines if an item is promotional/packaging material:
-    1. Product name contains promotional keywords: BAG, DIARY, SHIRT, CALENDER, CALENDAR, FOIL, BOX, PLAT CHARGES, PRODUCT, VISUAL-AID, PACKING, PEN-, PILLOW, PAD-, BANNER, STANDY, PAPER WEIGHT, CARTON.
+    1. Product name contains promotional keywords using word-boundary matching
+       so real medicines (e.g. DIOPEN-40, GENPEN-40, ORAL SUSPEN) are never falsely matched.
     2. Both manufacturer and supplier columns are blank in the input row.
     """
-    name_upper = (name or '').upper()
-    if any(kw in name_upper for kw in PROMO_NAME_KEYWORDS):
+    if not name:
+        return (not has_mfr) and (not has_sup)
+    if PROMO_NAME_REGEX.search(name):
         return True
     return (not has_mfr) and (not has_sup)
 
