@@ -311,8 +311,16 @@ class SalesIntelligenceService:
         horizon_90 = now + timedelta(days=90)
 
         # 1. Find all products historically purchased by this customer
+        customer = self.db.scalars(
+            select(Customer).where(Customer.customer_code == customer_code)
+        ).first()
+        cust_name = customer.customer_name if customer else customer_code
+
         sales = self.db.scalars(
-            select(SalesHistory).where(SalesHistory.customer_code == customer_code)
+            select(SalesHistory).where(
+                (SalesHistory.customer_code == customer_code) |
+                (func.lower(SalesHistory.customer_name) == func.lower(cust_name))
+            )
         ).all()
 
         prod_history = defaultdict(list)

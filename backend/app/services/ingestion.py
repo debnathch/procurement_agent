@@ -10,6 +10,7 @@ Key deduplication guarantee:
   (e.g. stock report used real MARG code 'A00920', sales report generated 'MED-82877'),
   the incoming data is remapped to the EXISTING code — no duplicate product is created.
 """
+import re
 from typing import Any
 from sqlalchemy.orm import Session
 from sqlalchemy import delete, select, func, update
@@ -280,11 +281,15 @@ class IngestionService:
             'suppliers_upserted': 0,
             'batches_inserted': 0,
             'sales_inserted': 0,
+            'customers_upserted': 0,
+            'receivables_upserted': 0,
+            'matched_customers': 0,
             'duplicates_merged': 0,
             'reorder_synced': 0,
             'total_rows_parsed': (
                 len(products_data) + len(batches_data) +
-                len(suppliers_data) + len(sales_data)
+                len(suppliers_data) + len(sales_data) +
+                len(parsed.get('customers', [])) + len(parsed.get('receivables', []))
             ),
         }
 
@@ -406,29 +411,7 @@ class IngestionService:
             self.db.add_all([InventoryBatch(**b) for b in resolved_batches])
             stats['batches_inserted'] += len(resolved_batches)
 
-        # ── 4. Insert Sales History ──────────────────────────────────────────
-        # product_name is stored as-is from MARG for traceability.
-        # product_code is resolved to the canonical code via normalization.
-        sales_records = []
-        for s_data in sales_data:
-            raw_name = s_data.get('product_name', '')
-            p_code = s_data['product_code']
-
-            # Resolve code against catalog using pharma normalization
-            resolved_code = self._resolve_code(p_code, raw_name)
-
-            s_rec = dict(s_data)
-            s_rec['product_code'] = resolved_code
-            s_rec['product_name'] = raw_name
-            sales_records.append(SalesHistory(**s_rec))
-
-        if sales_records:
-            self.db.add_all(sales_records)
-            stats['sales_inserted'] += len(sales_records)
-
-        self.db.commit()
-
-        # ── 5. Upsert Customers ──────────────────────────────────────────────
+        # ── 4. Upsert Customers ──────────────────────────────────────────────
         customers_data = parsed.get('customers', [])
         if customers_data:
             existing_custs = {c.customer_code: c for c in self.db.scalars(select(Customer)).all()}
@@ -444,7 +427,7 @@ class IngestionService:
                     existing_custs[ccode] = new_c
             stats['customers_upserted'] = len(customers_data)
 
-        # ── 6. Upsert Receivables ────────────────────────────────────────────
+        # ── 5. Upsert Receivables ────────────────────────────────────────────
         receivables_data = parsed.get('receivables', [])
         if receivables_data:
             existing_recs = {r.invoice_no: r for r in self.db.scalars(select(CustomerReceivable)).all()}
@@ -456,6 +439,85 @@ class IngestionService:
                 else:
                     self.db.add(CustomerReceivable(**r_data))
             stats['receivables_upserted'] = len(receivables_data)
+
+        self.db.commit()
+
+        # ── 6. Insert Sales History ──────────────────────────────────────────
+        # product_name is stored as-is from MARG for traceability.
+        # product_code is resolved to the canonical code via normalization.
+        # customer_code is resolved against existing customer master records.
+        sales_records = []
+        matched_customers = set()
+
+        # Build customer resolution caches
+        all_db_custs = self.db.scalars(select(Customer)).all()
+        cust_name_to_code = {c.customer_name.strip().upper(): c.customer_code for c in all_db_custs if c.customer_name}
+        cust_slug_to_code = {
+            re.sub(r'[^A-Za-z0-9]', '', c.customer_name)[:25].upper(): c.customer_code
+            for c in all_db_custs if c.customer_name
+        }
+        cust_code_set = {c.customer_code for c in all_db_custs if c.customer_code}
+
+        for s_data in sales_data:
+            raw_name = s_data.get('product_name', '')
+            p_code = s_data['product_code']
+
+            # Resolve code against catalog using pharma normalization
+            resolved_code = self._resolve_code(p_code, raw_name)
+
+            s_rec = dict(s_data)
+            s_rec['product_code'] = resolved_code
+            s_rec['product_name'] = raw_name
+
+            # Resolve customer code against customer master
+            c_name = (s_data.get('customer_name') or '').strip()
+            c_code = s_data.get('customer_code')
+
+            resolved_cust_code = None
+            if c_name:
+                c_name_key = c_name.upper()
+                c_slug_key = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
+                if c_name_key in cust_name_to_code:
+                    resolved_cust_code = cust_name_to_code[c_name_key]
+                elif c_slug_key in cust_slug_to_code:
+                    resolved_cust_code = cust_slug_to_code[c_slug_key]
+
+            if not resolved_cust_code:
+                if c_code and c_code in cust_code_set:
+                    resolved_cust_code = c_code
+                elif c_code:
+                    resolved_cust_code = c_code
+                elif c_name:
+                    clean_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
+                    resolved_cust_code = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
+
+            if resolved_cust_code:
+                s_rec['customer_code'] = resolved_cust_code
+                matched_customers.add(resolved_cust_code)
+
+                # If customer is not yet in Customer master, create an active record
+                if resolved_cust_code not in cust_code_set:
+                    new_cust = Customer(
+                        customer_code=resolved_cust_code,
+                        customer_name=c_name or resolved_cust_code,
+                        group_name='General',
+                        district='West Bengal',
+                        salesperson='Sales Team',
+                        status='ACTIVE',
+                    )
+                    self.db.add(new_cust)
+                    cust_code_set.add(resolved_cust_code)
+                    if c_name:
+                        cust_name_to_code[c_name.upper()] = resolved_cust_code
+                        cust_slug_to_code[re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()] = resolved_cust_code
+                    stats['customers_upserted'] = stats.get('customers_upserted', 0) + 1
+
+            sales_records.append(SalesHistory(**s_rec))
+
+        if sales_records:
+            self.db.add_all(sales_records)
+            stats['sales_inserted'] += len(sales_records)
+            stats['matched_customers'] = len(matched_customers)
 
         self.db.commit()
 

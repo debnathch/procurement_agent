@@ -383,3 +383,163 @@ def test_party_wise_individual_ledger_populates_transactions_and_product_sales()
     session.close()
 
 
+def test_two_uploaders_master_ledger_and_product_wise_sales_ledger():
+    """
+    Validates the user's two-uploader workflow in Sales UI:
+    Uploader 1: Master Customer Ledger Excel
+      - Extracts Ledger (Name), Group (Category), Debit (Customer Dues), Credit (Company Liable to Pay).
+      - Purges customer database cleanly when requested.
+    Uploader 2: Product-Wise Customer Ledger Excel
+      - Ingests customer product sales (Date, Party Name, Particulars/Item, Qty, Rate, Amount).
+      - Links to existing customers to populate order history and trigger recommendations.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.utcnow()
+
+    # 1. Warehouse stock setup: Product MED-001 with near-expiry batch
+    p1 = Product(
+        product_code='MED-AZITHRO-500',
+        product_name='AZITHROMYCIN 500MG TABS',
+        category='Antibiotics',
+        company='Zydus Cadila',
+        unit='strip',
+        unit_cost=110.0,
+        reorder_enabled=True,
+    )
+    b1 = InventoryBatch(
+        product_code='MED-AZITHRO-500',
+        batch_no='ZY-902',
+        company='Zydus Cadila',
+        qty_on_hand=80.0,
+        expiry_date=now + timedelta(days=45),  # 45 days remaining -> near expiry
+        unit_cost=110.0,
+    )
+    session.add_all([p1, b1])
+    session.commit()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # ------------------ UPLOADER 1: MASTER CUSTOMER LEDGER ------------------
+    master_data = [
+        {
+            'Ledger': '1ST JULY 2026 - DIGHA',
+            'Group': 'RETAIL PHARMACY',
+            'Debit': 418067.0,
+            'Credit': 0.0,
+            'Area': 'Digha Coastal',
+        },
+        {
+            'Ledger': 'PURULIA CARE PHARMA',
+            'Group': 'HOSPITAL SUPPLY',
+            'Debit': 75000.0,
+            'Credit': 15000.0,
+            'Area': 'Purulia Central',
+        },
+    ]
+    buf_master = io.BytesIO()
+    pd.DataFrame(master_data).to_excel(buf_master, index=False)
+
+    stats_master = ingest_svc.ingest_excel(buf_master.getvalue(), filename='Customer_Master_Ledger.xlsx')
+    assert stats_master['customers_upserted'] == 2
+    assert stats_master['receivables_upserted'] == 2
+    assert stats_master['sales_inserted'] == 0
+
+    # Verify Master Ledger data in UI service
+    groups = sales_svc.list_customer_groups()
+    assert set(groups) == {'HOSPITAL SUPPLY', 'RETAIL PHARMACY'}
+
+    custs = sales_svc.list_customers()
+    assert len(custs) == 2
+    digha = next(c for c in custs if c['customer_name'] == '1ST JULY 2026 - DIGHA')
+    purulia = next(c for c in custs if c['customer_name'] == 'PURULIA CARE PHARMA')
+
+    assert digha['current_dues'] == 418067.0
+    assert digha['company_payable'] == 0.0
+    assert digha['total_sales'] == 0.0
+    assert digha['total_orders'] == 0
+
+    assert purulia['current_dues'] == 75000.0
+    assert purulia['company_payable'] == 15000.0
+    assert purulia['net_receivable'] == 60000.0
+    assert purulia['total_sales'] == 0.0
+
+    # Verify summary before product ledger
+    summary_before = sales_svc.get_customer_summary(digha['customer_code'])
+    assert summary_before['total_sales'] == 0.0
+    assert summary_before['total_orders'] == 0
+    assert len(summary_before['recent_orders']) == 0
+
+    # Recommendations before product ledger: 0 because no order history yet
+    recs_before = sales_svc.get_customer_recommendations(digha['customer_code'])
+    assert len(recs_before['near_expiry_opportunities']) == 0
+
+    # ------------------ UPLOADER 2: PRODUCT-WISE SALES LEDGER ------------------
+    product_ledger_data = [
+        {
+            'Date': (now - timedelta(days=20)).strftime('%d/%m/%Y'),
+            'Party Name': '1ST JULY 2026 - DIGHA',
+            'Particulars': 'AZITHROMYCIN 500MG TABS',
+            'Invoice No': 'INV-2026-881',
+            'Qty': 30.0,
+            'Rate': 120.0,
+            'Amount': 3600.0,
+        },
+        {
+            'Date': (now - timedelta(days=10)).strftime('%d/%m/%Y'),
+            'Party Name': '1ST JULY 2026 - DIGHA',
+            'Particulars': 'AZITHROMYCIN 500MG TABS',
+            'Invoice No': 'INV-2026-920',
+            'Qty': 25.0,
+            'Rate': 120.0,
+            'Amount': 3000.0,
+        },
+        {
+            'Date': (now - timedelta(days=5)).strftime('%d/%m/%Y'),
+            'Party Name': 'PURULIA CARE PHARMA',
+            'Particulars': 'PARACETAMOL 650MG',
+            'Invoice No': 'INV-2026-955',
+            'Qty': 100.0,
+            'Rate': 25.0,
+            'Amount': 2500.0,
+        },
+    ]
+    buf_prod = io.BytesIO()
+    pd.DataFrame(product_ledger_data).to_excel(buf_prod, index=False)
+
+    stats_prod = ingest_svc.ingest_excel(buf_prod.getvalue(), filename='Product_Wise_Sales_Ledger.xlsx')
+    assert stats_prod['sales_inserted'] == 3
+    assert stats_prod['matched_customers'] == 2
+
+    # Step 3: Verify that Uploader 2 activated Order History and Recommendations!
+    summary_after = sales_svc.get_customer_summary(digha['customer_code'])
+    assert summary_after['current_dues'] == 418067.0
+    assert summary_after['company_payable'] == 0.0
+    assert summary_after['total_sales'] == 6600.0  # 3600 + 3000
+    assert summary_after['total_orders'] == 2
+    assert len(summary_after['recent_orders']) == 2
+    assert summary_after['sales_30d'] == 6600.0
+
+    # Near-expiry recommendation is now ACTIVATED for Digha because they buy Azithromycin!
+    recs_after = sales_svc.get_customer_recommendations(digha['customer_code'])
+    opps = recs_after['near_expiry_opportunities']
+    assert len(opps) == 1
+    assert opps[0]['product_code'] == 'MED-AZITHRO-500'
+    assert opps[0]['batch_no'] == 'ZY-902'
+    assert opps[0]['days_remaining'] <= 46
+    assert opps[0]['suggested_qty'] > 0
+
+    # Step 4: Verify Purge Customer Database wipes both Master and Sales records
+    purged = ingest_svc.purge_customer_data()
+    assert purged['deleted_customers'] == 2
+    assert purged['deleted_receivables'] == 2
+    assert purged['deleted_sales'] == 3
+
+    assert len(sales_svc.list_customers()) == 0
+    assert len(sales_svc.list_customer_groups()) == 0
+
+    session.close()
+
+

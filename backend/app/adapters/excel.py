@@ -384,6 +384,22 @@ def is_footer_or_junk_row(name: str) -> bool:
         'SAMPLE CHARGE',
         'DEMO CHARGE',
         'HANDLING CHARGE',
+        'OPENING BALANCE',
+        'CLOSING BALANCE',
+        'BY BALANCE',
+        'TO BALANCE',
+        'BY CHEQUE',
+        'TO CHEQUE',
+        'BY CASH',
+        'TO CASH',
+        'BY NEFT',
+        'TO NEFT',
+        'BY RTGS',
+        'TO RTGS',
+        'BY BANK',
+        'TO BANK',
+        'PAYMENT RECEIVED',
+        'AMOUNT RECEIVED',
     )
     if any(kw in s for kw in MARG_SERVICE_CHARGE_KEYWORDS):
         return True
@@ -1131,8 +1147,8 @@ class MargExcelParser:
             c_name = _clean_str(row.get(cust_name_col)) if cust_name_col else banner_party
             c_code = _clean_str(row.get(cust_code_col)) if cust_code_col else None
             if not c_code and c_name:
-                c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:10].upper()
-                c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 10000:04d}"
+                c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
+                c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
 
             inv_no = _clean_str(row.get(inv_no_col)) if inv_no_col else None
             row_date = parse_expiry_date(row.get(date_col)) if date_col else end_date
@@ -1713,8 +1729,8 @@ class MargExcelParser:
                 c_name = _clean_str(row.get('customer_name') or row.get('party_name') or row.get('supplier_name') or row.get('debtor_name'))
                 c_code = _clean_str(row.get('customer_code') or row.get('party_code'))
                 if not c_code and c_name:
-                    c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:10].upper()
-                    c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 10000:04d}"
+                    c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
+                    c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
 
                 inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no') or row.get('voucherno'))
                 batch_val = _clean_str(row.get('batch_no') or row.get('bno'))

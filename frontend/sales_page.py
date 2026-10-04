@@ -47,19 +47,42 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     # Section 1: Upload MARG Sales Excel & Demo Data
     expand_upload = st.session_state.get("expand_sales_upload", len(customers) == 0)
     with st.expander("📥 MARG Sales, Customer & Receivables Data Import Center", expanded=expand_upload):
-        col_up1, col_up2 = st.columns([2, 1])
-        with col_up1:
-            sales_file = st.file_uploader(
-                "Select MARG Customer Master / Ledger (.xlsx, .xls, .csv) or Party-Wise Individual Sales Ledger",
+        col_m_card, col_p_card = st.columns(2)
+
+        # ----------------- UPLOADER 1: MASTER CUSTOMER LEDGER -----------------
+        with col_m_card:
+            st.markdown("""
+            <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+                <div style="font-size: 1.05rem; font-weight: 700; color: #1E293B;">📁 1. Master Customer Ledger</div>
+                <div style="color: #475569; font-size: 0.82rem; margin-top: 3px;">
+                    Extracts <b>Customer Name</b> (<i>Ledger</i>), <b>Category</b> (<i>Group</i>), <b>Customer Dues</b> (<i>Debit</i>), and <b>Company Liability</b> (<i>Credit</i>).
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            master_file = st.file_uploader(
+                "Upload Master Customer Ledger (.xlsx, .xls, .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="sales_uploader_file"
+                key="sales_uploader_master_file",
+                help="Upload MARG Customer Master list containing Ledger, Group, Debit, Credit columns."
             )
-            st.caption("💡 **Customer Master Ledger**: Populates Customer Master, Customer Dues (Debit), and Company Liable to Pay (Credit). | **Party-Wise Ledger**: Populates individual transactions, product sales, turnover, and reorder intelligence.")
-            col_f1, col_f2 = st.columns([1, 1])
-            with col_f1:
-                do_upload = st.button("🚀 Ingest MARG Data", type="primary", key="btn_ingest_sales", use_container_width=True)
-            with col_f2:
-                do_purge = st.button("🗑️ Purge Customer Database", type="secondary", key="btn_purge_sales", use_container_width=True, help="Permanently delete all customer records and outstanding dues.")
+
+            col_m_btn1, col_m_btn2 = st.columns([1.3, 1])
+            with col_m_btn1:
+                do_upload_master = st.button(
+                    "🚀 Ingest Customer Master",
+                    type="primary",
+                    key="btn_ingest_master",
+                    use_container_width=True
+                )
+            with col_m_btn2:
+                do_purge = st.button(
+                    "🗑️ Purge Customer DB",
+                    type="secondary",
+                    key="btn_purge_sales",
+                    use_container_width=True,
+                    help="Permanently delete all customer records, dues, and transaction history."
+                )
 
             if do_purge:
                 with st.spinner("Purging customer database..."):
@@ -70,7 +93,11 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                             purged = data.get("purged", {})
                             c_del = purged.get("deleted_customers", 0)
                             r_del = purged.get("deleted_receivables", 0)
-                            st.session_state["sales_upload_banner"] = f"🗑️ Customer database purged! Removed {c_del} customer(s) and {r_del} receivable record(s)."
+                            s_del = purged.get("deleted_sales", 0)
+                            st.session_state["sales_upload_banner"] = (
+                                f"🗑️ Customer database purged! Removed {c_del} customer(s), "
+                                f"{r_del} receivable record(s), and {s_del} sales row(s)."
+                            )
                             st.session_state["expand_sales_upload"] = True
                             st.rerun()
                         else:
@@ -82,30 +109,29 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                         st.session_state["expand_sales_upload"] = True
                         st.rerun()
 
-            if do_upload:
-                if not sales_file:
-                    st.warning("⚠️ Please select an Excel file (.xlsx, .xls, .csv) above before clicking 'Ingest MARG Data'.")
+            if do_upload_master:
+                if not master_file:
+                    st.warning("⚠️ Please select a Master Customer Ledger file above before clicking 'Ingest Customer Master'.")
                 else:
-                    with st.spinner(f"Ingesting '{sales_file.name}' into database..."):
+                    with st.spinner(f"Ingesting Customer Master '{master_file.name}' into database..."):
                         try:
-                            files = {"file": (sales_file.name, sales_file.getvalue())}
+                            files = {"file": (master_file.name, master_file.getvalue())}
                             params = {"clear_existing": False}
                             res = requests.post(f"{BACKEND_URL}/sales/upload-marg", files=files, params=params, timeout=120)
                             if res.status_code == 200:
                                 data = res.json()
                                 stats = data.get("stats", {})
                                 c_count = stats.get('customers_upserted', 0)
-                                s_count = stats.get('sales_inserted', 0)
                                 r_count = stats.get('receivables_upserted', 0)
-                                if c_count == 0 and s_count == 0 and r_count == 0:
+                                if c_count == 0 and r_count == 0:
                                     st.session_state["sales_upload_error"] = (
-                                        f"⚠️ File '{sales_file.name}' was uploaded, but no customer records or sales/dues columns could be recognized. "
-                                        f"Please ensure columns like Party Name, Total Sales, or Dues are present."
+                                        f"⚠️ File '{master_file.name}' was uploaded, but no customer records or dues columns were recognized. "
+                                        f"Please ensure columns like 'Ledger' (Customer Name), 'Group', 'Debit', 'Credit' are present."
                                     )
                                 else:
                                     st.session_state["sales_upload_banner"] = (
-                                        f"✅ Successfully ingested '{sales_file.name}'! "
-                                        f"Customers: {c_count}, Sales Lines: {s_count}, Receivables: {r_count}"
+                                        f"✅ Successfully ingested Master Customer Ledger '{master_file.name}'! "
+                                        f"Customers: {c_count}, Dues & Liabilities Recorded: {r_count}"
                                     )
                                 st.session_state["expand_sales_upload"] = False
                                 st.rerun()
@@ -118,15 +144,80 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                             st.session_state["expand_sales_upload"] = True
                             st.rerun()
 
-        with col_up2:
-            st.markdown("#### 🧪 Quick Demo Data")
-            st.caption("Instantly load realistic sample MARG customers, receivables, and sales history for testing.")
-            if st.button("Load Demo Customers & Dues", key="btn_seed_demo_sales", use_container_width=True):
-                with st.spinner("Loading demo customers..."):
+        # ----------------- UPLOADER 2: PRODUCT-WISE CUSTOMER LEDGER -----------------
+        with col_p_card:
+            st.markdown("""
+            <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+                <div style="font-size: 1.05rem; font-weight: 700; color: #1E293B;">📦 2. Product-Wise Customer Ledger</div>
+                <div style="color: #475569; font-size: 0.82rem; margin-top: 3px;">
+                    Extracts <b>Date, Party Name, Invoice No, Item/Particulars, Qty, Rate, and Amount</b>. Activates order history, near-expiry matching, and reorder intelligence.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            product_file = st.file_uploader(
+                "Upload Product-Wise Sales Ledger (.xlsx, .xls, .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="sales_uploader_prod_file",
+                help="Upload MARG Customer Product Sales Ledger containing Date, Party Name, Particulars/Item, Qty, Rate, Amount."
+            )
+
+            do_upload_product = st.button(
+                "🚀 Ingest Product-Wise Sales Ledger",
+                type="primary",
+                key="btn_ingest_product_ledger",
+                use_container_width=True
+            )
+
+            if do_upload_product:
+                if not product_file:
+                    st.warning("⚠️ Please select a Product-Wise Sales Ledger file above before clicking 'Ingest Product-Wise Sales Ledger'.")
+                else:
+                    with st.spinner(f"Ingesting Product-Wise Ledger '{product_file.name}' into database..."):
+                        try:
+                            files = {"file": (product_file.name, product_file.getvalue())}
+                            params = {"clear_existing": False}
+                            res = requests.post(f"{BACKEND_URL}/sales/upload-marg", files=files, params=params, timeout=120)
+                            if res.status_code == 200:
+                                data = res.json()
+                                stats = data.get("stats", {})
+                                s_count = stats.get('sales_inserted', 0)
+                                m_count = stats.get('matched_customers', 0)
+                                c_count = stats.get('customers_upserted', 0)
+                                if s_count == 0:
+                                    st.session_state["sales_upload_error"] = (
+                                        f"⚠️ File '{product_file.name}' was uploaded, but no product sales transactions were recognized. "
+                                        f"Please ensure columns like Date, Party Name, Particulars / Item Description, Qty, Rate, or Amount are present."
+                                    )
+                                else:
+                                    st.session_state["sales_upload_banner"] = (
+                                        f"✅ Successfully ingested Product-Wise Customer Ledger '{product_file.name}'! "
+                                        f"Sales Transactions: {s_count}, Customers Linked: {m_count or c_count}. "
+                                        f"Order history, near-expiry matching, and recommendations are now activated!"
+                                    )
+                                st.session_state["expand_sales_upload"] = False
+                                st.rerun()
+                            else:
+                                st.session_state["sales_upload_error"] = f"Upload failed ({res.status_code}): {res.text}"
+                                st.session_state["expand_sales_upload"] = True
+                                st.rerun()
+                        except Exception as e:
+                            st.session_state["sales_upload_error"] = f"Error communicating with backend: {e}"
+                            st.session_state["expand_sales_upload"] = True
+                            st.rerun()
+
+        # ----------------- DEMO DATA ROW -----------------
+        st.markdown("---")
+        col_demo1, col_demo2 = st.columns([3, 1])
+        with col_demo1:
+            st.caption("🧪 **Quick Demo Evaluation**: Need ready-made test data? Load realistic sample customers, category groups, dues (Debit), company liabilities (Credit), and historical product sales with near-expiry matches.")
+        with col_demo2:
+            if st.button("⚡ Load Demo Data", key="btn_seed_demo_sales", use_container_width=True):
+                with st.spinner("Loading demo customers & sales..."):
                     try:
                         res = requests.post(f"{BACKEND_URL}/sales/seed-demo", timeout=15)
                         if res.status_code == 200:
-                            st.session_state["sales_upload_banner"] = "✅ Demo customers, receivables, and sales history loaded successfully!"
+                            st.session_state["sales_upload_banner"] = "✅ Demo customers, dues, and sales transactions loaded successfully!"
                             st.session_state["expand_sales_upload"] = False
                             st.rerun()
                         else:
@@ -298,10 +389,10 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         due_str = f"{oldest_days} Days" if oldest_days > 0 else "0 Days"
         st.metric("Oldest Due Age", due_str, help=f"Oldest Due Voucher/Invoice: {oldest_inv}")
 
-    st.markdown("#### 📊 Sales Activity & Turnover *(Populated via Party-Wise Individual Ledger)*")
+    st.markdown("#### 📊 Sales Activity & Turnover *(Populated via Product-Wise Customer Ledger)*")
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
     with col_s1:
-        st.metric("Total Historical Sales", f"₹{tot_sales:,.2f}", help="Total billed sales turnover from party-wise sales ledger")
+        st.metric("Total Historical Sales", f"₹{tot_sales:,.2f}", help="Total billed sales turnover from product-wise customer ledger")
     with col_s2:
         st.metric("Sales (Last 30 Days)", f"₹{sales_30d:,.2f}")
     with col_s3:
@@ -310,7 +401,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         st.metric("Total Orders / Invoices", total_orders, help=f"Last Order Date: {last_order_dt} ({days_since_order} days ago)")
 
     if total_orders == 0 and tot_sales == 0.0:
-        st.info("ℹ️ **Party-Wise Individual Ledger Pending**: Sales figures, order volume, and transaction history will be populated when this customer's party-wise individual ledger (with transaction dates, invoice numbers, products, and sales figures) is uploaded.")
+        st.info("ℹ️ **Product-Wise Customer Ledger Pending**: Sales figures, order volume, and transaction history will be populated when this customer's product-wise sales ledger (Uploader 2 above) is uploaded.")
 
     st.markdown("---")
 
@@ -332,7 +423,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
         near_opps = recommendations.get('near_expiry_opportunities', [])
         if total_orders == 0:
-            st.info("ℹ️ **Party-Wise Individual Ledger Pending**: Near-expiry product opportunities match against products this customer historically purchases. Upload this customer's party-wise individual sales ledger to activate.")
+            st.info("ℹ️ **Product-Wise Customer Ledger Pending**: Near-expiry product opportunities match against products this customer historically purchases. Upload product-wise customer sales ledger (Uploader 2 above) to activate.")
         elif not near_opps:
             st.info("✅ No near-expiry products currently matching this customer's historical purchasing profile.")
         else:
@@ -380,7 +471,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         st.subheader("🎯 Regular Reorder Candidates ('What to Ask Today')")
         reorders = recommendations.get('regular_reorders', [])
         if total_orders == 0:
-            st.info("ℹ️ **Party-Wise Individual Ledger Pending**: Reorder frequency, order patterns, and suggested replenishment quantities are calculated from the customer's individual sales transaction history.")
+            st.info("ℹ️ **Product-Wise Customer Ledger Pending**: Reorder frequency, order patterns, and suggested replenishment quantities are calculated from product-wise sales transactions (Uploader 2 above).")
         elif not reorders:
             st.info("No reorders currently due based on expected reorder cycles.")
         else:
@@ -407,7 +498,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         st.subheader("📜 Historical Sales Transactions")
         recent_orders = summary.get('recent_orders', [])
         if not recent_orders:
-            st.info("ℹ️ **No Party-Wise Individual Ledger Uploaded Yet**: Each transaction, invoice number, product sale, quantity sold, rate, and amount will be displayed here once this party's individual ledger is ingested.")
+            st.info("ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: Each transaction, invoice number, product sale, quantity sold, rate, and amount will be displayed here once product-wise sales transactions (Uploader 2 above) are ingested.")
         else:
             df_orders = pd.DataFrame(recent_orders)
             df_orders.rename(columns={
