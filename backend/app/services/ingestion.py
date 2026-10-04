@@ -452,11 +452,26 @@ class IngestionService:
         # Build customer resolution caches
         all_db_custs = self.db.scalars(select(Customer)).all()
         cust_name_to_code = {c.customer_name.strip().upper(): c.customer_code for c in all_db_custs if c.customer_name}
+        cust_clean_spaces_to_code = {
+            re.sub(r'\s+', ' ', c.customer_name).strip().upper(): c.customer_code
+            for c in all_db_custs if c.customer_name
+        }
         cust_slug_to_code = {
             re.sub(r'[^A-Za-z0-9]', '', c.customer_name)[:25].upper(): c.customer_code
             for c in all_db_custs if c.customer_name
         }
+        cust_full_slug_to_code = {
+            re.sub(r'[^A-Za-z0-9]', '', c.customer_name).upper(): c.customer_code
+            for c in all_db_custs if c.customer_name
+        }
         cust_code_set = {c.customer_code for c in all_db_custs if c.customer_code}
+
+        # Pre-load catalog unit costs to populate rate and amount if missing in sales report
+        prod_costs = {
+            p.product_code: p.unit_cost
+            for p in self.db.scalars(select(Product)).all()
+            if p.unit_cost and p.unit_cost > 0
+        }
 
         for s_data in sales_data:
             raw_name = s_data.get('product_name', '')
@@ -476,11 +491,23 @@ class IngestionService:
             resolved_cust_code = None
             if c_name:
                 c_name_key = c_name.upper()
+                c_clean_key = re.sub(r'\s+', ' ', c_name).strip().upper()
                 c_slug_key = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
+                c_full_slug_key = re.sub(r'[^A-Za-z0-9]', '', c_name).upper()
+
                 if c_name_key in cust_name_to_code:
                     resolved_cust_code = cust_name_to_code[c_name_key]
+                elif c_clean_key in cust_clean_spaces_to_code:
+                    resolved_cust_code = cust_clean_spaces_to_code[c_clean_key]
                 elif c_slug_key in cust_slug_to_code:
                     resolved_cust_code = cust_slug_to_code[c_slug_key]
+                elif c_full_slug_key in cust_full_slug_to_code:
+                    resolved_cust_code = cust_full_slug_to_code[c_full_slug_key]
+                else:
+                    for c_clean, c_c_code in cust_clean_spaces_to_code.items():
+                        if len(c_clean_key) > 8 and (c_clean_key in c_clean or c_clean in c_clean_key):
+                            resolved_cust_code = c_c_code
+                            break
 
             if not resolved_cust_code:
                 if c_code and c_code in cust_code_set:
@@ -490,6 +517,12 @@ class IngestionService:
                 elif c_name:
                     clean_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
                     resolved_cust_code = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
+
+            # Fallback for rate & amount from product catalog
+            if s_rec.get('rate', 0.0) <= 0:
+                s_rec['rate'] = prod_costs.get(resolved_code, 0.0)
+            if s_rec.get('amount', 0.0) <= 0 and s_rec.get('qty_sold', 0.0) > 0:
+                s_rec['amount'] = round(s_rec['qty_sold'] * s_rec.get('rate', 0.0), 2)
 
             if resolved_cust_code:
                 s_rec['customer_code'] = resolved_cust_code
@@ -509,10 +542,19 @@ class IngestionService:
                     cust_code_set.add(resolved_cust_code)
                     if c_name:
                         cust_name_to_code[c_name.upper()] = resolved_cust_code
+                        cust_clean_spaces_to_code[re.sub(r'\s+', ' ', c_name).strip().upper()] = resolved_cust_code
                         cust_slug_to_code[re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()] = resolved_cust_code
+                        cust_full_slug_to_code[re.sub(r'[^A-Za-z0-9]', '', c_name).upper()] = resolved_cust_code
                     stats['customers_upserted'] = stats.get('customers_upserted', 0) + 1
 
             sales_records.append(SalesHistory(**s_rec))
+
+        if matched_customers:
+            self.db.execute(
+                delete(SalesHistory).where(
+                    SalesHistory.customer_code.in_(list(matched_customers))
+                )
+            )
 
         if sales_records:
             self.db.add_all(sales_records)

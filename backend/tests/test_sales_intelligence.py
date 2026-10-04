@@ -543,3 +543,108 @@ def test_two_uploaders_master_ledger_and_product_wise_sales_ledger():
     session.close()
 
 
+def test_hierarchical_marg_party_product_wise_sales_ledger():
+    """
+    Validates ingestion of hierarchical MARG exports (e.g., CUSTOMER_PRODUCT LEDGER.XLS)
+    where Party names and Products are in the same column, separated by Party Total,
+    with page break headers and quantities (Sale Qty, Net Qty).
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # 1. Setup products with unit cost in catalog
+    p1 = Product(
+        product_code='MED-ENRON-8',
+        product_name='ENRON-8 TAB ALU ALU 10X10',
+        category='Tablets',
+        company='Ben Remedies',
+        unit='box',
+        unit_cost=150.0,
+        reorder_enabled=True,
+    )
+    p2 = Product(
+        product_code='MED-PETALIFE-D',
+        product_name='PETALIFE-D TAB 10x10',
+        category='Tablets',
+        company='Ben Remedies',
+        unit='box',
+        unit_cost=80.0,
+        reorder_enabled=True,
+    )
+    session.add_all([p1, p2])
+    session.commit()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # Ingest Master Customer Ledger first
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'A.B. MEDICINE CENTRE-THIRDPARTPURBA BURDWAN',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 12500.0,
+            'Credit': 500.0,
+        }
+    ])
+    buf_master = io.BytesIO()
+    master_df.to_excel(buf_master, index=False)
+    ingest_svc.ingest_excel(buf_master.getvalue(), filename='CUSTOMER_MASTER_LEDGER.XLS')
+
+    # 2. Construct hierarchical MARG dataframe simulating CUSTOMER_PRODUCT LEDGER.XLS
+    hierarchical_data = [
+        {'Party/Product Name': 'Party/Product Wise Net Sales From 01/04/2026 To 03/10/2026', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'BEN REMEDIES', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'NETAJI SUBHAS ROAD, PURBA BARDHAMAN', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'GSTIN : 19AABCB1234F1Z1', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        # Customer Header 1
+        {'Party/Product Name': 'A.B. MEDICINE CENTRE-THIRDPARTPURBA BURDWAN', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        # Product Rows
+        {'Party/Product Name': 'ENRON-8 TAB ALU ALU 10X10', 'Sale Qty': 100.0, 'Ret Qty': 0.0, 'Net Qty': 100.0},
+        {'Party/Product Name': 'PETALIFE-D TAB 10x10', 'Sale Qty': 50.0, 'Ret Qty': 0.0, 'Net Qty': 50.0},
+        # Party Total
+        {'Party/Product Name': 'Party Total :', 'Sale Qty': 150.0, 'Ret Qty': 0.0, 'Net Qty': 150.0},
+        # Page Break Noise
+        {'Party/Product Name': 'Continued..2', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'Page No..2', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        # Customer Header 2 (New party not in master)
+        {'Party/Product Name': 'NEW BARDHAMAN CHEMISTS', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'ENRON-8 TAB ALU ALU 10X10', 'Sale Qty': 20.0, 'Ret Qty': 0.0, 'Net Qty': 20.0},
+        {'Party/Product Name': 'Party Total :', 'Sale Qty': 20.0, 'Ret Qty': 0.0, 'Net Qty': 20.0},
+        {'Party/Product Name': 'Grand Total :', 'Sale Qty': 170.0, 'Ret Qty': 0.0, 'Net Qty': 170.0},
+    ]
+
+    buf = io.BytesIO()
+    pd.DataFrame(hierarchical_data).to_excel(buf, index=False)
+
+    stats = ingest_svc.ingest_excel(buf.getvalue(), filename='CUSTOMER_PRODUCT_LEDGER.XLS')
+    assert stats['sales_inserted'] == 3
+    assert stats['matched_customers'] == 2
+
+    # Verify existing customer summary enriched with sales history & products
+    cust_ab = next(c for c in sales_svc.list_customers() if 'A.B. MEDICINE' in c['customer_name'])
+    summary_ab = sales_svc.get_customer_summary(cust_ab['customer_code'])
+    assert summary_ab is not None
+    # Master ledger figures must stay intact
+    assert summary_ab['current_dues'] == 12500.0
+    assert summary_ab['company_payable'] == 500.0
+    assert summary_ab['net_receivable'] == 12000.0
+    # Sales figures and items must be populated
+    assert summary_ab['total_orders'] == 2
+    assert summary_ab['total_sales'] == (100 * 150.0) + (50 * 80.0)  # 15,000 + 4,000 = 19,000
+    assert len(summary_ab['recent_orders']) == 2
+
+    items = {tx['product_name']: tx['qty'] for tx in summary_ab['recent_orders']}
+    assert items['ENRON-8 TAB ALU ALU 10X10'] == 100.0
+    assert items['PETALIFE-D TAB 10x10'] == 50.0
+
+    # Verify newly discovered party was auto-created as active customer
+    new_cust = next((c for c in sales_svc.list_customers() if 'NEW BARDHAMAN' in c['customer_name']), None)
+    assert new_cust is not None
+    summary_new = sales_svc.get_customer_summary(new_cust['customer_code'])
+    assert summary_new['total_orders'] == 1
+    assert summary_new['total_sales'] == 20 * 150.0  # 3000
+
+    session.close()
+
+
