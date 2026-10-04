@@ -433,10 +433,26 @@ def _make_stable_code(name: str) -> str:
 def _parse_float(val: Any, default: float = 0.0) -> float:
     if val is None or pd.isna(val):
         return default
-    s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').replace('Rs', '').strip()
+    if isinstance(val, (int, float)):
+        return float(val) if not pd.isna(val) else default
+
+    s = str(val).strip()
+    s_clean = s.replace(',', '').replace('₹', '').replace('Rs.', '').replace('Rs', '').replace('INR', '').strip()
+    is_neg = False
+    if s_clean.startswith('(') and s_clean.endswith(')'):
+        is_neg = True
+        s_clean = s_clean[1:-1].strip()
+
+    # Strip Dr / Cr suffixes common in Indian accounting ledgers (e.g. '12345.50 Dr', '500 Cr.')
+    s_clean = re.sub(r'[\s\(\)]*(?:dr|cr)\.?[\s\(\)]*$', '', s_clean, flags=re.IGNORECASE).strip()
     try:
-        return float(s)
+        val_f = float(s_clean)
+        return -val_f if is_neg else val_f
     except (ValueError, TypeError):
+        m = re.search(r'[-+]?\d+(?:\.\d+)?', s_clean)
+        if m:
+            val_f = float(m.group(0))
+            return -val_f if is_neg else val_f
         return default
 
 
@@ -1430,63 +1446,68 @@ class MargExcelParser:
                     code = f"{base_code[:20]}-{cnt}"
                     cnt += 1
 
+            clean_row = {_clean_alpha(k): v for k, v in row.items()}
+
             # Debit column in customer ledger represents Customer Dues (amount customer owes to company)
-            debit_dues = _parse_float(
+            raw_debit = (
                 row.get('balance_outstanding') or
-                row.get('debit') or
-                row.get('dramt') or
-                row.get('dramount') or
-                row.get('dr') or
-                row.get('due') or
-                row.get('dues') or
-                row.get('total_dues') or
-                row.get('due_amount') or
-                row.get('outstanding') or
-                row.get('outstanding_amount') or
-                row.get('balance') or
-                row.get('closing_balance') or
-                row.get('cl_bal') or
-                row.get('balamt') or
-                row.get('pending_amount') or
-                row.get('pending_due') or
-                row.get('net_due'),
-                0.0
+                clean_row.get('balanceoutstanding') or
+                clean_row.get('debit') or
+                clean_row.get('dramt') or
+                clean_row.get('dr') or
+                clean_row.get('debitamount') or
+                clean_row.get('debitrs') or
+                clean_row.get('dramount') or
+                clean_row.get('due') or
+                clean_row.get('dues') or
+                clean_row.get('totaldues') or
+                clean_row.get('closingdr') or
+                clean_row.get('closingdebit') or
+                clean_row.get('outstanding') or
+                clean_row.get('outstandingamount')
             )
+            debit_dues = _parse_float(raw_debit, 0.0)
 
             # Credit column represents Company Liability (amount company is liable to pay to customer)
-            credit_liability = _parse_float(
+            raw_credit = (
                 row.get('credit_amount') or
-                row.get('credit') or
-                row.get('cramt') or
-                row.get('cramount') or
-                row.get('cr'),
-                0.0
+                clean_row.get('creditamount') or
+                clean_row.get('credit') or
+                clean_row.get('cramt') or
+                clean_row.get('cr') or
+                clean_row.get('creditrs') or
+                clean_row.get('cramount') or
+                clean_row.get('totalcredit') or
+                clean_row.get('closingcr') or
+                clean_row.get('closingcredit') or
+                clean_row.get('liability') or
+                clean_row.get('companyliability') or
+                clean_row.get('liabletopay') or
+                clean_row.get('advance')
             )
+            credit_liability = _parse_float(raw_credit, 0.0)
 
-            # Total sales is ONLY extracted from explicit sales register columns (NOT from Debit)
-            tot_sales = _parse_float(
-                row.get('total_sales') or
-                row.get('sale_amount') or
-                row.get('sales') or
-                row.get('turnover') or
-                row.get('totalsale') or
-                row.get('salesturnover') or
-                row.get('turnoveramt'),
-                0.0
-            )
+            # Fallback if separate Debit/Credit columns are absent but Balance indicates Dr or Cr
+            if debit_dues == 0.0 and credit_liability == 0.0:
+                raw_bal = str(row.get('balance') or clean_row.get('balance') or clean_row.get('closingbalance') or clean_row.get('clbal') or '').strip()
+                if 'dr' in raw_bal.lower():
+                    debit_dues = _parse_float(raw_bal, 0.0)
+                elif 'cr' in raw_bal.lower():
+                    credit_liability = _parse_float(raw_bal, 0.0)
 
-            mr_name = _clean_str(row.get('salesperson') or row.get('channel') or row.get('mrname') or row.get('salesman') or 'Sales Team')
-            cr_days = int(_parse_float(row.get('lead_time_days') or row.get('creditdays') or row.get('crdays'), settings.default_lead_time_days))
+            mr_name = _clean_str(row.get('salesperson') or row.get('channel') or row.get('mrname') or row.get('salesman') or clean_row.get('salesperson') or clean_row.get('mrname') or 'Sales Team')
+            cr_days = int(_parse_float(row.get('lead_time_days') or row.get('creditdays') or row.get('crdays') or clean_row.get('crdays') or clean_row.get('creditdays'), settings.default_lead_time_days))
 
             grp_name = _clean_str(
                 row.get('group_name') or
-                row.get('group') or
-                row.get('category') or
-                row.get('customer_group') or
-                row.get('party_group') or
-                row.get('grp') or
-                row.get('ac_group') or
-                row.get('ledger_group') or
+                clean_row.get('groupname') or
+                clean_row.get('group') or
+                clean_row.get('category') or
+                clean_row.get('customergroup') or
+                clean_row.get('partygroup') or
+                clean_row.get('grp') or
+                clean_row.get('acgroup') or
+                clean_row.get('ledgergroup') or
                 ''
             )
 
@@ -1495,56 +1516,39 @@ class MargExcelParser:
                     'customer_code': code,
                     'customer_name': name,
                     'group_name': grp_name or None,
-                    'address': _clean_str(row.get('address') or row.get('remarks') or ''),
-                    'area': _clean_str(row.get('area') or ''),
-                    'district': _clean_str(row.get('district') or row.get('place') or row.get('city') or 'General'),
-                    'state': _clean_str(row.get('state') or 'West Bengal'),
-                    'phone': _clean_str(row.get('phone') or ''),
+                    'address': _clean_str(row.get('address') or clean_row.get('address') or ''),
+                    'area': _clean_str(row.get('area') or clean_row.get('area') or ''),
+                    'district': _clean_str(row.get('district') or row.get('place') or clean_row.get('district') or clean_row.get('place') or clean_row.get('city') or 'General'),
+                    'state': _clean_str(row.get('state') or clean_row.get('state') or 'West Bengal'),
+                    'phone': _clean_str(row.get('phone') or clean_row.get('phone') or ''),
                     'salesperson': mr_name,
-                    'credit_limit': _parse_float(row.get('credit_limit'), 0.0),
+                    'credit_limit': _parse_float(row.get('credit_limit') or clean_row.get('creditlimit'), 0.0),
                     'status': 'ACTIVE',
                 })
                 seen_codes.add(code)
 
-            # Only append sales history if an actual sales register column was present
-            if tot_sales > 0:
-                inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no')) or f"SALE-{code}"
-                out['sales_history'].append({
-                    'product_code': f"SALES-{code}",
-                    'product_name': f"{name} (Sales Turnover)",
-                    'sale_date': now_dt,
-                    'qty_sold': 1.0,
-                    'channel': mr_name,
-                    'customer_code': code,
-                    'customer_name': name,
-                    'invoice_no': inv_no,
-                    'rate': tot_sales,
-                    'amount': tot_sales,
-                })
-
             # Record customer receivable: Debit = Customer Dues, Credit = Amount company is liable to pay
-            if debit_dues > 0 or credit_liability > 0:
-                inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no') or row.get('voucherno') or row.get('billnumber')) or f"DUE-{code}"
-                days_val = int(_parse_float(row.get('days_due') or row.get('days') or row.get('duedays') or row.get('age') or row.get('overdue') or row.get('lead_time_days'), 0.0))
-                bucket = (
-                    'Current' if days_val <= 0 else
-                    '1–30 Days' if days_val <= 30 else
-                    '31–60 Days' if days_val <= 60 else
-                    '61–90 Days' if days_val <= 90 else
-                    '> 90 Days'
-                )
-                out['receivables'].append({
-                    'customer_code': code,
-                    'customer_name': name,
-                    'invoice_no': inv_no,
-                    'invoice_date': now_dt,
-                    'due_date': now_dt + timedelta(days=max(1, cr_days)),
-                    'invoice_amount': debit_dues,         # Customer Dues (Debit)
-                    'adjusted_amount': credit_liability,   # Amount company is liable to pay (Credit)
-                    'outstanding_amount': debit_dues,     # Customer Dues (Debit)
-                    'days_due': days_val,
-                    'ageing_bucket': bucket,
-                })
+            inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no') or row.get('voucherno') or row.get('billnumber') or clean_row.get('invoiceno') or clean_row.get('billno')) or f"DUE-{code}"
+            days_val = int(_parse_float(row.get('days_due') or clean_row.get('daysdue') or clean_row.get('days') or clean_row.get('duedays') or clean_row.get('age') or clean_row.get('overdue') or row.get('lead_time_days'), 0.0))
+            bucket = (
+                'Current' if days_val <= 0 else
+                '1–30 Days' if days_val <= 30 else
+                '31–60 Days' if days_val <= 60 else
+                '61–90 Days' if days_val <= 90 else
+                '> 90 Days'
+            )
+            out['receivables'].append({
+                'customer_code': code,
+                'customer_name': name,
+                'invoice_no': inv_no,
+                'invoice_date': now_dt,
+                'due_date': now_dt + timedelta(days=max(1, cr_days)),
+                'invoice_amount': debit_dues,         # Customer Dues (Debit)
+                'adjusted_amount': credit_liability,   # Amount company is liable to pay (Credit)
+                'outstanding_amount': debit_dues,     # Customer Dues (Debit)
+                'days_due': days_val,
+                'ageing_bucket': bucket,
+            })
 
     @classmethod
     def _extract_stock_and_products(cls, df: pd.DataFrame, out: dict[str, list[dict[str, Any]]]):
