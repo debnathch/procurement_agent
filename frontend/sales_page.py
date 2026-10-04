@@ -38,7 +38,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     customers = []
     if is_healthy:
         try:
-            c_res = requests.get(f"{BACKEND_URL}/sales/customers", timeout=10)
+            c_res = requests.get(f"{BACKEND_URL}/sales/customers?limit=10000", timeout=15)
             if c_res.status_code == 200:
                 customers = c_res.json()
         except Exception as e:
@@ -146,25 +146,36 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     # Extract distinct groups from customer list (populated from Excel 'Group' column)
     all_groups = []
     seen_groups = set()
+    group_counts = {}
     for c in customers:
-        grp = c.get('group_name')
-        if grp and str(grp).strip() and str(grp).strip() not in seen_groups:
-            all_groups.append(str(grp).strip())
-            seen_groups.add(str(grp).strip())
+        grp = str(c.get('group_name') or 'General').strip()
+        group_counts[grp] = group_counts.get(grp, 0) + 1
+        if grp and grp not in seen_groups:
+            all_groups.append(grp)
+            seen_groups.add(grp)
     all_groups.sort()
+
+    # Format group options with live counts
+    group_display_map = {
+        "All": f"All Categories / Groups ({len(customers)})"
+    }
+    for g in all_groups:
+        group_display_map[g] = f"{g} ({group_counts.get(g, 0)})"
+
+    raw_group_choices = ["All"] + all_groups
 
     col_cat, col_cust = st.columns([1, 2])
     with col_cat:
-        group_options = ["All Categories / Groups"] + all_groups
         selected_group = st.selectbox(
             "1️⃣ Category / Group (from Excel 'Group'):",
-            options=group_options,
+            options=raw_group_choices,
+            format_func=lambda x: group_display_map.get(x, x),
             key="sales_selected_group_dropdown"
         )
 
     # Filter customers by selected group
-    if selected_group != "All Categories / Groups":
-        filtered_customers = [c for c in customers if c.get('group_name') == selected_group]
+    if selected_group != "All":
+        filtered_customers = [c for c in customers if str(c.get('group_name') or 'General').strip() == selected_group]
     else:
         filtered_customers = customers
 
@@ -181,7 +192,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         grp = c.get('group_name') or 'General'
         tot_s = c.get('total_sales', 0.0)
         dues = c.get('current_dues', 0.0)
-        label = f"{name} ({code}) — [{grp} | {dist}] | Sales: ₹{tot_s:,.0f} | Dues: ₹{dues:,.0f}"
+        label = f"{name} ({code}) — [{grp}] | Sales: ₹{tot_s:,.0f} | Dues: ₹{dues:,.0f}"
         cust_options.append(label)
         cust_code_map[label] = code
 

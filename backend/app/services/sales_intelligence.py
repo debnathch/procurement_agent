@@ -32,7 +32,7 @@ class SalesIntelligenceService:
         groups = [g for g in self.db.scalars(stmt).all() if g and str(g).strip()]
         return sorted(list(set(groups)))
 
-    def list_customers(self, search: Optional[str] = None, group: Optional[str] = None, limit: int = 500) -> list[dict[str, Any]]:
+    def list_customers(self, search: Optional[str] = None, group: Optional[str] = None, limit: int = 5000) -> list[dict[str, Any]]:
         """
         Retrieves all customers with aggregated total sales and current dues.
         If no Customer records exist yet, synthesizes customer list from sales_history.

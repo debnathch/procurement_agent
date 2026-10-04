@@ -649,13 +649,15 @@ def _find_header_row(df_raw: pd.DataFrame) -> int:
         'clstock', 'closingstock', 'batchno', 'expdate', 'expirydate',
         'purrate', 'purchaserate', 'suppliername', 'partyname',
         'totalbillvaleuptodate', 'balanceoutstanding', 'qtysold', 'soldqty',
-        'quantity', 'avrate', 'amount'
+        'quantity', 'avrate', 'amount',
+        'ledger', 'accountname', 'customername', 'debtorname', 'group', 'debit', 'credit'
     }
     general_header_keywords = {
         'code', 'item', 'product', 'batch', 'particulars', 'description', 'stock', 'rate',
         'supplier', 'party', 'mfr', 'manufacturer', 'vendor', 'balance', 'bill', 'qty',
         'pack', 'pkg', 'packing', 'exp', 'expiry', 'name', 'slno', 'crdays', 'mrname',
-        'cost', 'unit', 'reorder', 'moq', 'leadtime', 'free', 'net', 'mrp'
+        'cost', 'unit', 'reorder', 'moq', 'leadtime', 'free', 'net', 'mrp',
+        'ledger', 'group', 'debit', 'credit', 'dramt', 'cramt'
     }
 
     scan_limit = min(35, len(df_raw))
@@ -709,6 +711,9 @@ def _map_columns(df: pd.DataFrame) -> dict[str, str]:
         # In sales / debtor / customer context, 'party' refers to customer
         aliases_dict['customer_name'] = ['partyname', 'party'] + [a for a in aliases_dict['customer_name'] if a not in ('partyname', 'party')]
         aliases_dict['supplier_name'] = [a for a in aliases_dict['supplier_name'] if a not in ('partyname', 'party')]
+        # In customer context, 'group' refers to customer category / group
+        aliases_dict['group_name'] = ['group', 'groupname', 'customergroup', 'partygroup', 'category', 'customertype', 'segment'] + [a for a in aliases_dict.get('group_name', []) if a not in ('group', 'groupname', 'category')]
+        aliases_dict['category'] = [a for a in aliases_dict.get('category', []) if a not in ('group', 'groupname')]
 
     # Phase 1: Exact alias matches across all canonical keys
     for canonical, aliases in aliases_dict.items():
@@ -893,7 +898,8 @@ class MargExcelParser:
             any('party' in c for c in cleaned_col_names) or
             any('customer' in c for c in cleaned_col_names) or
             any('debtor' in c for c in cleaned_col_names) or
-            any('account' in c for c in cleaned_col_names)
+            any('account' in c for c in cleaned_col_names) or
+            any('ledger' in c for c in cleaned_col_names)
         )
 
         has_stock_cols = (
@@ -927,18 +933,8 @@ class MargExcelParser:
             ('outstanding' in file_lower) or
             ('op master' in sheet_lower) or
             ('totalbillvaleuptodate' in cleaned_col_names) or
-            ('balance_outstanding' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns) or
-            ('days_due' in df_renamed.columns and 'invoice_no' in df_renamed.columns)
-        )
-
-        is_supplier_sheet = not is_outstanding_sheet and not is_sales_report and (
-            ('manufacturer list' in banner_text) or
-            ('supplier list' in banner_text) or
-            ('supplier' in file_lower) or
-            ('manufacturer' in file_lower) or
-            any(w in sheet_lower for w in ('supplier', 'manufacturer', 'mfr', 'vendor')) or
-            ('place' in df_renamed.columns and 'remarks' in df_renamed.columns and 'supplier_name' in df_renamed.columns) or
-            ('supplier_name' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns and 'qty_sold' not in df_renamed.columns and 'balance_outstanding' not in df_renamed.columns)
+            ('days_due' in df_renamed.columns and 'invoice_no' in df_renamed.columns) or
+            ('balance_outstanding' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns and 'customer_name' not in df_renamed.columns)
         )
 
         is_customer_sheet = not is_outstanding_sheet and not is_sales_report and (
@@ -947,20 +943,30 @@ class MargExcelParser:
             ('debtors list' in banner_text) or
             ('party list' in banner_text) or
             ('customer list' in banner_text) or
+            ('ledger' in banner_text) or
             ('customer' in file_lower) or
             ('debtor' in file_lower) or
             ('party' in file_lower) or
+            ('ledger' in file_lower) or
             ('customer' in sheet_lower) or
             ('debtor' in sheet_lower) or
             ('party' in sheet_lower) or
-            # MARG ERP party-wise ledger export: has 'Ledger' column as customer name
-            ('ledger' in file_lower) or
             ('ledger' in sheet_lower) or
+            ('group_name' in df_renamed.columns and 'customer_name' in df_renamed.columns) or
             ('customer_name' in df_renamed.columns and 'credit_amount' in df_renamed.columns) or
             ('customer_name' in df_renamed.columns and 'total_sales' in df_renamed.columns and not has_stock_cols) or
             (has_customer_cols and not has_stock_cols) or
-            ('total_sales' in df_renamed.columns and not has_stock_cols) or
-            ('customer_code' in df_renamed.columns and 'customer_name' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns and 'qty_sold' not in df_renamed.columns and 'balance_outstanding' not in df_renamed.columns)
+            ('customer_code' in df_renamed.columns and 'customer_name' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns and 'qty_sold' not in df_renamed.columns)
+        )
+
+        is_supplier_sheet = not is_outstanding_sheet and not is_sales_report and not is_customer_sheet and (
+            ('manufacturer list' in banner_text) or
+            ('supplier list' in banner_text) or
+            ('supplier' in file_lower) or
+            ('manufacturer' in file_lower) or
+            any(w in sheet_lower for w in ('supplier', 'manufacturer', 'mfr', 'vendor')) or
+            ('place' in df_renamed.columns and 'remarks' in df_renamed.columns and 'supplier_name' in df_renamed.columns) or
+            ('supplier_name' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns and 'qty_sold' not in df_renamed.columns and 'balance_outstanding' not in df_renamed.columns)
         )
 
         if is_outstanding_sheet:
@@ -1342,6 +1348,7 @@ class MargExcelParser:
                     out['customers'].append({
                         'customer_code': party_id,
                         'customer_name': party_name,
+                        'group_name': _clean_str(row.get('group_name') or row.get('category') or row.get('group') or '') or None,
                         'district': _clean_str(row.get('district') or row.get('place') or row.get('area') or 'West Bengal'),
                         'salesperson': mr_name or 'Sales Team',
                         'credit_limit': 0.0,
@@ -1396,8 +1403,13 @@ class MargExcelParser:
                 row.get('supplier_id')
             )
             if not code:
-                clean_slug = re.sub(r'[^A-Za-z0-9]', '', name)[:10].upper()
-                code = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(name)) % 10000:04d}"
+                clean_slug = re.sub(r'[^A-Za-z0-9]', '', name)[:25].upper()
+                base_code = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(name)) % 100000:05d}"
+                code = base_code
+                cnt = 1
+                while code in seen_codes:
+                    code = f"{base_code[:20]}-{cnt}"
+                    cnt += 1
 
             tot_sales = _parse_float(
                 row.get('total_sales') or

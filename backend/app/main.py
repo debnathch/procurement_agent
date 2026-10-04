@@ -744,7 +744,7 @@ def list_sales_customer_groups(db: Session = Depends(get_db)):
 def list_sales_customers(
     search: Optional[str] = None,
     group: Optional[str] = None,
-    limit: int = 500,
+    limit: int = 5000,
     db: Session = Depends(get_db)
 ):
     """Retrieves all customers with total sales and current dues, optionally filtered by group."""

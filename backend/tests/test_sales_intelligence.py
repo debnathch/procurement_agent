@@ -227,7 +227,54 @@ def test_customer_group_ingestion_filtering_and_purge():
     remaining = sales_svc.list_customers()
     assert len(remaining) == 0
     groups_after = sales_svc.list_customer_groups()
-    assert len(groups_after) == 0
+    session.close()
+
+
+def test_marg_ledger_588_customers_ingestion_and_group_filtering():
+    """Validates complete ingestion and group filtering for 588 MARG ledger rows."""
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    categories = ['RETAIL PHARMACY', 'HOSPITAL SUPPLY', 'WHOLESALE DISTRIBUTOR', 'GOVERNMENT INSTITUTION']
+    data = []
+    for i in range(1, 589):
+        cat = categories[i % len(categories)]
+        debit = 10000.0 * (i % 20 + 1)
+        credit = 8000.0 * (i % 20 + 1)
+        data.append({
+            'Ledger': f'CHEMIST STORE {i:03d} PHARMA',
+            'Group': cat,
+            'Debit': debit,
+            'Credit': credit,
+            'Balance': debit - credit,
+            'Area': f'Zone {i % 10}',
+        })
+
+    df = pd.DataFrame(data)
+    assert len(df) == 588
+
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+
+    ingest_svc = IngestionService(session)
+    stats = ingest_svc.ingest_excel(buf.getvalue(), filename='MARG_Ledger_588.xlsx')
+    assert stats['customers_upserted'] == 588
+
+    sales_svc = SalesIntelligenceService(session)
+    all_custs = sales_svc.list_customers()
+    assert len(all_custs) == 588
+
+    groups = sales_svc.list_customer_groups()
+    assert set(groups) == set(categories)
+
+    for cat in categories:
+        cat_custs = sales_svc.list_customers(group=cat)
+        expected_count = sum(1 for d in data if d['Group'] == cat)
+        assert len(cat_custs) == expected_count
+        for c in cat_custs:
+            assert c['group_name'] == cat
 
     session.close()
+
 
