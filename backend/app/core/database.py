@@ -116,8 +116,16 @@ def init_db():
             ('procurement_proposals', 'company', 'VARCHAR(256)'),
             ('procurement_proposals', 'manufacturer', 'VARCHAR(256)'),
             ('procurement_proposals', 'batch_numbers', 'VARCHAR(512)'),
-            # v2 — sales_history product name traceability
+            # v2 — sales_history product name & customer traceability
             ('sales_history', 'product_name', 'VARCHAR(256)'),
+            ('sales_history', 'customer_code', 'VARCHAR(64)'),
+            ('sales_history', 'customer_name', 'VARCHAR(256)'),
+            ('sales_history', 'invoice_no', 'VARCHAR(64)'),
+            ('sales_history', 'batch_no', 'VARCHAR(64)'),
+            ('sales_history', 'company', 'VARCHAR(256)'),
+            ('sales_history', 'free_qty', 'FLOAT DEFAULT 0.0'),
+            ('sales_history', 'rate', 'FLOAT DEFAULT 0.0'),
+            ('sales_history', 'amount', 'FLOAT DEFAULT 0.0'),
         ]:
             try:
                 cols = [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]

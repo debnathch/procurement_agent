@@ -125,10 +125,74 @@ class SalesHistory(Base):
     sale_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     qty_sold: Mapped[float] = mapped_column(Float, default=0.0)
     channel: Mapped[str | None] = mapped_column(String(64))
+    customer_code: Mapped[str | None] = mapped_column(String(64))
+    customer_name: Mapped[str | None] = mapped_column(String(256))
+    invoice_no: Mapped[str | None] = mapped_column(String(64))
+    batch_no: Mapped[str | None] = mapped_column(String(64))
+    company: Mapped[str | None] = mapped_column(String(256))
+    free_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    rate: Mapped[float] = mapped_column(Float, default=0.0)
+    amount: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
         Index('ix_sales_history_product_date', 'product_code', 'sale_date'),
+        Index('ix_sales_history_customer_code', 'customer_code'),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Customer Master (for Sales Intelligence)
+# ---------------------------------------------------------------------------
+class Customer(Base):
+    """
+    Customer / Party master record imported from MARG ERP.
+    """
+    __tablename__ = 'customers'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    customer_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    address: Mapped[str | None] = mapped_column(String(256))
+    area: Mapped[str | None] = mapped_column(String(128))
+    district: Mapped[str | None] = mapped_column(String(128))
+    state: Mapped[str | None] = mapped_column(String(128))
+    phone: Mapped[str | None] = mapped_column(String(64))
+    salesperson: Mapped[str | None] = mapped_column(String(128))
+    credit_limit: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(32), default='ACTIVE')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index('ix_customers_code', 'customer_code'),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Customer Receivables / Outstanding (Bill-wise)
+# ---------------------------------------------------------------------------
+class CustomerReceivable(Base):
+    """
+    Bill-wise outstanding receivables imported from MARG ERP.
+    """
+    __tablename__ = 'customer_receivables'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    customer_name: Mapped[str | None] = mapped_column(String(256))
+    invoice_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    invoice_date: Mapped[datetime | None] = mapped_column(DateTime)
+    due_date: Mapped[datetime | None] = mapped_column(DateTime)
+    invoice_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    adjusted_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    outstanding_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    days_due: Mapped[int] = mapped_column(Integer, default=0)
+    ageing_bucket: Mapped[str] = mapped_column(String(32), default='Current')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index('ix_receivables_customer_code', 'customer_code'),
     )
 
 

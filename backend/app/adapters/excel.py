@@ -88,8 +88,18 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     'channel': ['mrname', 'channel', 'salesman', 'rep'],
     'remarks': ['remarks', 'remark', 'certification', 'notes'],
     'place': ['place', 'location', 'city', 'station'],
-    'balance_outstanding': ['balanceoutstanding', 'baloutstanding', 'dueoutstanding'],
+    'balance_outstanding': ['balanceoutstanding', 'baloutstanding', 'dueoutstanding', 'outstanding', 'balance', 'balamt', 'pendingamount'],
     'op_due': ['opdue', 'openingdue'],
+    'customer_code': ['customercode', 'custcode', 'partycode', 'partyid', 'debtorcode', 'customer_code', 'accountcode', 'custid'],
+    'customer_name': ['customername', 'partyname', 'custname', 'accountname', 'debtorname', 'party', 'customer', 'customer_name', 'clientname'],
+    'invoice_no': ['invoiceno', 'invoicenumber', 'billno', 'billnumber', 'invno', 'voucherno', 'vchno', 'bill_no', 'invoice_no'],
+    'invoice_amount': ['invoiceamount', 'billamount', 'netamount', 'totalamount', 'billamt', 'invamount', 'grandtotal', 'amount'],
+    'due_date': ['duedate', 'due_date', 'paydate', 'paymentdate'],
+    'days_due': ['daysdue', 'duedays', 'daysoutstanding', 'ageing', 'overduedays', 'due_days'],
+    'district': ['district', 'area', 'city', 'zone', 'territory', 'location'],
+    'phone': ['phone', 'mobile', 'contact', 'telephoneno', 'phoneno'],
+    'salesperson': ['salesperson', 'salesman', 'rep', 'mrname', 'fieldrep', 'salesrep'],
+    'credit_limit': ['creditlimit', 'crlimit'],
 }
 
 
@@ -719,6 +729,8 @@ class MargExcelParser:
             'inventory_batches': [],
             'suppliers': [],
             'sales_history': [],
+            'customers': [],
+            'receivables': [],
         }
 
         excel_file: pd.ExcelFile | None = None
@@ -838,6 +850,19 @@ class MargExcelParser:
             ('supplier_name' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns and 'qty_sold' not in df_renamed.columns)
         )
 
+        is_customer_sheet = (
+            ('customer master' in banner_text) or
+            ('party master' in banner_text) or
+            ('debtors list' in banner_text) or
+            ('party list' in banner_text) or
+            ('customer list' in banner_text) or
+            ('customer' in file_lower) or
+            ('debtor' in file_lower) or
+            ('customer' in sheet_lower) or
+            ('debtor' in sheet_lower) or
+            ('customer_code' in df_renamed.columns and 'customer_name' in df_renamed.columns and 'qty_on_hand' not in df_renamed.columns and 'qty_sold' not in df_renamed.columns)
+        )
+
         is_outstanding_sheet = (
             ('outstanding' in banner_text) or
             ('outstanding' in file_lower) or
@@ -849,6 +874,8 @@ class MargExcelParser:
             cls._extract_sales_summary(df, out, banner_text)
         elif is_purchase_report:
             cls._extract_purchase_summary(df, out, banner_text)
+        elif is_customer_sheet:
+            cls._extract_customers(df_renamed, out)
         elif is_supplier_sheet:
             cls._extract_suppliers(df_renamed, out)
         elif is_outstanding_sheet:
@@ -932,6 +959,25 @@ class MargExcelParser:
             elif c_norm in ('avrate', 'rate', 'cost', 'unitcost', 'averagerate', 'avgrate', 'mrp'):
                 rate_col = c
 
+        cust_name_col = None
+        cust_code_col = None
+        inv_no_col = None
+        date_col = None
+        amt_col = None
+
+        for c in df.columns:
+            c_norm = _clean_alpha(c)
+            if c_norm in ('partyname', 'customername', 'party', 'customer', 'accountname', 'debtorname'):
+                cust_name_col = c
+            elif c_norm in ('partycode', 'customercode', 'custcode', 'accountcode', 'debtorcode'):
+                cust_code_col = c
+            elif c_norm in ('invoiceno', 'billno', 'voucherno', 'invno', 'billnumber'):
+                inv_no_col = c
+            elif c_norm in ('invoicedate', 'billdate', 'date', 'saledate', 'vchdate'):
+                date_col = c
+            elif c_norm in ('netamount', 'billamount', 'amount', 'totalamount', 'netamt', 'total'):
+                amt_col = c
+
         if not name_col:
             name_col = df.columns[0]
         if not qty_col and len(df.columns) > 1:
@@ -946,6 +992,18 @@ class MargExcelParser:
             free = _parse_float(row.get(free_col), 0.0) if free_col else 0.0
             total_sold = qty + free
             rate = _parse_float(row.get(rate_col), 0.0) if rate_col else 0.0
+            amt  = _parse_float(row.get(amt_col), 0.0) if amt_col else (total_sold * rate)
+
+            c_name = _clean_str(row.get(cust_name_col)) if cust_name_col else None
+            c_code = _clean_str(row.get(cust_code_col)) if cust_code_col else None
+            if not c_code and c_name:
+                c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:10].upper()
+                c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 10000:04d}"
+
+            inv_no = _clean_str(row.get(inv_no_col)) if inv_no_col else None
+            row_date = parse_expiry_date(row.get(date_col)) if date_col else end_date
+            if not row_date:
+                row_date = end_date
 
             code = _make_stable_code(name)
 
@@ -955,10 +1013,27 @@ class MargExcelParser:
                 out['sales_history'].append({
                     'product_code': code,
                     'product_name': name,       # saved from ITEM DESCRIPTION column
-                    'sale_date': end_date,      # single representative date (end of report period)
+                    'sale_date': row_date,      # representative date or transaction date
                     'qty_sold': round(total_sold, 4),
                     'channel': 'retail',
+                    'customer_code': c_code,
+                    'customer_name': c_name,
+                    'invoice_no': inv_no,
+                    'rate': rate,
+                    'amount': round(amt, 2),
                 })
+
+            if c_code and c_name and 'customers' in out:
+                seen_c = {c['customer_code'] for c in out['customers']}
+                if c_code not in seen_c:
+                    out['customers'].append({
+                        'customer_code': c_code,
+                        'customer_name': c_name,
+                        'district': 'West Bengal',
+                        'salesperson': 'Sales Team',
+                        'credit_limit': 0.0,
+                        'status': 'ACTIVE',
+                    })
 
     @classmethod
     def _extract_purchase_summary(
@@ -1117,10 +1192,78 @@ class MargExcelParser:
             if total_bill > 0:
                 out['sales_history'].append({
                     'product_code': party_id,
+                    'product_name': f"{party_name} (PCD Sales)",
                     'sale_date': col_date,
                     'qty_sold': total_bill,
                     'channel': mr_name or 'PCD',
+                    'customer_code': party_id,
+                    'customer_name': party_name,
+                    'amount': total_bill,
                 })
+
+            # Also populate customers master and receivables
+            if 'customers' in out:
+                seen_custs = {c['customer_code'] for c in out['customers']}
+                if party_id not in seen_custs:
+                    out['customers'].append({
+                        'customer_code': party_id,
+                        'customer_name': party_name,
+                        'district': _clean_str(row.get('district') or row.get('place') or 'West Bengal'),
+                        'salesperson': mr_name or 'Sales Team',
+                        'credit_limit': 0.0,
+                        'status': 'ACTIVE',
+                    })
+
+            if 'receivables' in out and balance > 0:
+                inv_no = _clean_str(row.get('invoice_no')) or f"BILL-{party_id}"
+                days_val = int(_parse_float(row.get('days_due'), 0.0))
+                bucket = (
+                    'Current' if days_val <= 0 else
+                    '1–30 Days' if days_val <= 30 else
+                    '31–60 Days' if days_val <= 60 else
+                    '61–90 Days' if days_val <= 90 else
+                    '> 90 Days'
+                )
+                out['receivables'].append({
+                    'customer_code': party_id,
+                    'customer_name': party_name,
+                    'invoice_no': inv_no,
+                    'invoice_date': col_date,
+                    'due_date': col_date + timedelta(days=cr_days),
+                    'invoice_amount': total_bill if total_bill > 0 else balance,
+                    'adjusted_amount': max(0.0, total_bill - balance) if total_bill > 0 else 0.0,
+                    'outstanding_amount': balance,
+                    'days_due': days_val,
+                    'ageing_bucket': bucket,
+                })
+
+    @classmethod
+    def _extract_customers(cls, df: pd.DataFrame, out: dict[str, list[dict[str, Any]]]):
+        """Extracts customer/party records from MARG customer master sheets."""
+        seen_codes = {c['customer_code'] for c in out['customers']}
+        for row in df.to_dict('records'):
+            name = _clean_str(row.get('customer_name') or row.get('supplier_name') or row.get('product_name'))
+            if not name or is_footer_or_junk_row(name):
+                continue
+            code = _clean_str(row.get('customer_code'))
+            if not code:
+                clean_slug = re.sub(r'[^A-Za-z0-9]', '', name)[:10].upper()
+                code = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(name)) % 10000:04d}"
+
+            if code not in seen_codes:
+                out['customers'].append({
+                    'customer_code': code,
+                    'customer_name': name,
+                    'address': _clean_str(row.get('address') or row.get('remarks') or ''),
+                    'area': _clean_str(row.get('area') or ''),
+                    'district': _clean_str(row.get('district') or row.get('place') or 'General'),
+                    'state': _clean_str(row.get('state') or 'West Bengal'),
+                    'phone': _clean_str(row.get('phone') or ''),
+                    'salesperson': _clean_str(row.get('salesperson') or row.get('channel') or 'Sales Team'),
+                    'credit_limit': _parse_float(row.get('credit_limit'), 0.0),
+                    'status': 'ACTIVE',
+                })
+                seen_codes.add(code)
 
     @classmethod
     def _extract_stock_and_products(cls, df: pd.DataFrame, out: dict[str, list[dict[str, Any]]]):

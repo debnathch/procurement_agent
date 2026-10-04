@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import delete, select, func, update
 from backend.app.models.entities import (
     Product, Supplier, InventoryBatch, SalesHistory,
-    ProcurementRun, ProcurementProposal, FeedbackEvent
+    ProcurementRun, ProcurementProposal, FeedbackEvent,
+    Customer, CustomerReceivable
 )
 from backend.app.services.audit import audit
 from backend.app.adapters.excel import MargExcelParser
@@ -108,6 +109,8 @@ class IngestionService:
         del_fb   = self.db.execute(delete(FeedbackEvent)).rowcount
         del_prop = self.db.execute(delete(ProcurementProposal)).rowcount
         del_runs = self.db.execute(delete(ProcurementRun)).rowcount
+        del_recv = self.db.execute(delete(CustomerReceivable)).rowcount
+        del_cust = self.db.execute(delete(Customer)).rowcount
         del_batch = self.db.execute(delete(InventoryBatch)).rowcount
         del_sales = self.db.execute(delete(SalesHistory)).rowcount
         del_prod = self.db.execute(delete(Product)).rowcount
@@ -124,6 +127,8 @@ class IngestionService:
                 'deleted_feedback': del_fb,
                 'deleted_proposals': del_prop,
                 'deleted_runs': del_runs,
+                'deleted_receivables': del_recv,
+                'deleted_customers': del_cust,
                 'deleted_batches': del_batch,
                 'deleted_sales': del_sales,
                 'deleted_products': del_prod,
@@ -134,6 +139,8 @@ class IngestionService:
         return {
             'deleted_products': del_prod,
             'deleted_suppliers': del_sup,
+            'deleted_customers': del_cust,
+            'deleted_receivables': del_recv,
             'deleted_batches': del_batch,
             'deleted_sales': del_sales,
             'deleted_proposals': del_prop,
@@ -393,7 +400,38 @@ class IngestionService:
 
         self.db.commit()
 
-        # ── 5. Post-upload reorder & stock sync ──────────────────────────────
+        # ── 5. Upsert Customers ──────────────────────────────────────────────
+        customers_data = parsed.get('customers', [])
+        if customers_data:
+            existing_custs = {c.customer_code: c for c in self.db.scalars(select(Customer)).all()}
+            for c_data in customers_data:
+                ccode = c_data['customer_code']
+                if ccode in existing_custs:
+                    for k, v in c_data.items():
+                        if v is not None and v != '':
+                            setattr(existing_custs[ccode], k, v)
+                else:
+                    new_c = Customer(**c_data)
+                    self.db.add(new_c)
+                    existing_custs[ccode] = new_c
+            stats['customers_upserted'] = len(customers_data)
+
+        # ── 6. Upsert Receivables ────────────────────────────────────────────
+        receivables_data = parsed.get('receivables', [])
+        if receivables_data:
+            existing_recs = {r.invoice_no: r for r in self.db.scalars(select(CustomerReceivable)).all()}
+            for r_data in receivables_data:
+                inv = r_data['invoice_no']
+                if inv in existing_recs:
+                    for k, v in r_data.items():
+                        setattr(existing_recs[inv], k, v)
+                else:
+                    self.db.add(CustomerReceivable(**r_data))
+            stats['receivables_upserted'] = len(receivables_data)
+
+        self.db.commit()
+
+        # ── 7. Post-upload reorder & stock sync ──────────────────────────────
         # After committing all sales rows, recalculate reorder_point and current_stock
         # for every product that has sales history so KPI cards and proposals are fresh.
         if sales_data:

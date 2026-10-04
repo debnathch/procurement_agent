@@ -24,6 +24,7 @@ from backend.app.models.entities import (
 from backend.app.agent.procurement_agent import ProcurementAgent, is_ignored_item_name
 from backend.app.services.feedback import ProposalService
 from backend.app.services.ingestion import IngestionService
+from backend.app.services.sales_intelligence import SalesIntelligenceService
 from backend.app.adapters.excel import create_sample_marg_excel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -727,5 +728,80 @@ def get_system_logs(lines: int = 100):
                     "lines": all_lines[-lines:],
                 }
     return {"lines": [], "message": "Log file not found."}
+
+
+# ---------------------------------------------------------------------------
+# Sales Intelligence & Customer Recommendations
+# ---------------------------------------------------------------------------
+@app.get('/sales/customers', tags=['sales'])
+def list_sales_customers(
+    search: Optional[str] = None,
+    limit: int = 500,
+    db: Session = Depends(get_db)
+):
+    """Retrieves all customers with total sales and current dues."""
+    svc = SalesIntelligenceService(db)
+    return svc.list_customers(search=search, limit=limit)
+
+
+@app.get('/sales/customers/{customer_code}/summary', tags=['sales'])
+def get_customer_summary(
+    customer_code: str,
+    db: Session = Depends(get_db)
+):
+    """Retrieves detailed financial summary, sales 30d/90d, ageing, and history for a customer."""
+    svc = SalesIntelligenceService(db)
+    return svc.get_customer_summary(customer_code)
+
+
+@app.get('/sales/customers/{customer_code}/recommendations', tags=['sales'])
+def get_customer_recommendations(
+    customer_code: str,
+    db: Session = Depends(get_db)
+):
+    """Retrieves near-expiry opportunities and reorder candidates for a customer."""
+    svc = SalesIntelligenceService(db)
+    return svc.get_customer_recommendations(customer_code)
+
+
+@app.post('/sales/upload-marg', tags=['sales'])
+def upload_sales_marg_excel(
+    file: UploadFile = File(...),
+    clear_existing: bool = Query(False, description='Purge previous customer data'),
+    db: Session = Depends(get_db)
+):
+    """Uploads MARG Sales Register, Customer Master, or Bill-wise Outstanding Excel/CSV file."""
+    filename_lower = file.filename.lower()
+    if not (filename_lower.endswith('.xlsx') or filename_lower.endswith('.xls') or filename_lower.endswith('.csv')):
+        raise HTTPException(
+            status_code=400,
+            detail='Invalid file format. Please upload a MARG export file (.xlsx, .xls, or .csv).'
+        )
+
+    content = file.file.read()
+    ingestion_service = IngestionService(db)
+    try:
+        stats = ingestion_service.ingest_excel(content, filename=file.filename, clear_existing=clear_existing)
+    except Exception as exc:
+        logger.error("Failed to parse MARG Sales Excel %s: %s", file.filename, exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=f'Failed to parse MARG Excel: {exc}')
+
+    return {
+        'status': 'success',
+        'filename': file.filename,
+        'stats': stats,
+    }
+
+
+@app.post('/sales/seed-demo', tags=['sales'])
+def seed_demo_sales_data(db: Session = Depends(get_db)):
+    """Seeds realistic demo customers, receivables, and sales history for instant evaluation."""
+    stats = SalesIntelligenceService.seed_demo_data(db)
+    return {
+        'status': 'success',
+        'message': 'Seeded demo customers, receivables, and sales transactions successfully.',
+        'stats': stats,
+    }
+
 
 
