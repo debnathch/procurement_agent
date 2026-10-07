@@ -1245,3 +1245,83 @@ def test_sales_dashboard_overview_and_revenue_bins():
     session.close()
 
 
+def test_sales_dashboard_overview_group_filtering():
+    """
+    Validates that get_sales_dashboard_overview dynamically recalculates all
+    sales KPIs, customer counts, and revenue slabs when a customer category/group is specified.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # Create 3 customers in SUNDRY DEBTORS and 2 in HOSPITAL SUPPLY
+    custs = [
+        ('CUST-D1', 'DEBTOR CHEMIST 1', 'SUNDRY DEBTORS', 100000.0),
+        ('CUST-D2', 'DEBTOR CHEMIST 2', 'SUNDRY DEBTORS', 400000.0),
+        ('CUST-D3', 'DEBTOR CHEMIST 3', 'SUNDRY DEBTORS', 700000.0),
+        ('CUST-H1', 'HOSPITAL 1', 'HOSPITAL SUPPLY', 1500000.0),
+        ('CUST-H2', 'HOSPITAL 2', 'HOSPITAL SUPPLY', 3000000.0),
+    ]
+
+    for code, name, grp, sales_amt in custs:
+        session.add(Customer(
+            customer_code=code,
+            customer_name=name,
+            group_name=grp,
+            district='Purba Bardhaman',
+            status='ACTIVE'
+        ))
+        session.add(SalesHistory(
+            product_code='MED-001',
+            product_name='AZITHROMYCIN 500',
+            sale_date=datetime.utcnow(),
+            qty_sold=10.0,
+            rate=sales_amt / 10.0,
+            amount=sales_amt,
+            customer_code=code,
+            customer_name=name
+        ))
+
+    session.commit()
+    sales_svc = SalesIntelligenceService(session)
+
+    # 1. Overview for ALL categories
+    all_overview = sales_svc.get_sales_dashboard_overview()
+    assert all_overview['total_customers'] == 5
+    assert all_overview['total_sales'] == 100000.0 + 400000.0 + 700000.0 + 1500000.0 + 3000000.0
+
+    # 2. Overview filtered specifically by 'SUNDRY DEBTORS'
+    debtor_overview = sales_svc.get_sales_dashboard_overview(group='SUNDRY DEBTORS')
+    assert debtor_overview['total_customers'] == 3
+    assert debtor_overview['total_sales'] == 100000.0 + 400000.0 + 700000.0
+
+    debtor_bins = {b['bin_label']: b for b in debtor_overview['customer_sales_bins']}
+    assert debtor_bins['0 to 2 Lakh']['customer_count'] == 1
+    assert debtor_bins['0 to 2 Lakh']['total_sales'] == 100000.0
+
+    assert debtor_bins['>2 to 5 Lakh']['customer_count'] == 1
+    assert debtor_bins['>2 to 5 Lakh']['total_sales'] == 400000.0
+
+    assert debtor_bins['>5 to 8 Lakh']['customer_count'] == 1
+    assert debtor_bins['>5 to 8 Lakh']['total_sales'] == 700000.0
+
+    assert debtor_bins['>8 to 12 Lakh']['customer_count'] == 0
+    assert debtor_bins['>12 to 20 Lakh']['customer_count'] == 0
+    assert debtor_bins['>20 Lakh']['customer_count'] == 0
+
+    # 3. Overview filtered specifically by 'HOSPITAL SUPPLY'
+    hosp_overview = sales_svc.get_sales_dashboard_overview(group='HOSPITAL SUPPLY')
+    assert hosp_overview['total_customers'] == 2
+    assert hosp_overview['total_sales'] == 1500000.0 + 3000000.0
+
+    hosp_bins = {b['bin_label']: b for b in hosp_overview['customer_sales_bins']}
+    assert hosp_bins['0 to 2 Lakh']['customer_count'] == 0
+    assert hosp_bins['>12 to 20 Lakh']['customer_count'] == 1
+    assert hosp_bins['>12 to 20 Lakh']['total_sales'] == 1500000.0
+    assert hosp_bins['>20 Lakh']['customer_count'] == 1
+    assert hosp_bins['>20 Lakh']['total_sales'] == 3000000.0
+
+    session.close()
+
+
+

@@ -227,27 +227,76 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                         st.session_state["sales_upload_error"] = f"Error communicating with backend: {e}"
                         st.rerun()
 
-    # Section 2: Executive Sales Dashboard & Customer Revenue Slabs (Bins)
+    # Section 2: Master Customer Category Filter & Sales Calculations
     if not customers:
         st.info("ℹ️ No customer records found. Please expand the upload section above to upload a MARG Sales/Customer file or click 'Load Demo Customers & Dues'.")
         return
 
-    # Fetch or compute overview metrics
+    # Extract distinct groups from customer list (populated from Excel 'Group' column)
+    all_groups = []
+    seen_groups = set()
+    group_counts = {}
+    for c in customers:
+        grp = str(c.get('group_name') or 'General').strip()
+        group_counts[grp] = group_counts.get(grp, 0) + 1
+        if grp and grp not in seen_groups:
+            all_groups.append(grp)
+            seen_groups.add(grp)
+    all_groups.sort()
+
+    group_display_map = {
+        "All": f"All Customer Categories ({len(customers)} Total Accounts)"
+    }
+    for g in all_groups:
+        group_display_map[g] = f"{g} ({group_counts.get(g, 0)} Accounts)"
+
+    raw_group_choices = ["All"] + all_groups
+
+    st.markdown("""
+    <div style="background-color: #F8FAFC; border-left: 5px solid #0284C7; border: 1px solid #CBD5E1; border-left-width: 5px; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;">
+        <div style="font-size: 1.0rem; font-weight: 700; color: #0F172A;">
+            🎯 Filter All Sales & Calculations by Customer Category
+        </div>
+        <div style="font-size: 0.83rem; color: #475569; margin-top: 2px;">
+            Choose a customer category below. All sales KPIs, customer counts, outstanding dues, and revenue slab calculations will immediately recalculate for the selected category.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_cat_sel, col_cat_badge = st.columns([2, 3])
+    with col_cat_sel:
+        selected_group = st.selectbox(
+            "🏷️ Customer Category / Group (from Excel 'Group'):",
+            options=raw_group_choices,
+            format_func=lambda x: group_display_map.get(x, x),
+            key="sales_selected_group_dropdown"
+        )
+
+    # Filter customers by selected group
+    if selected_group != "All":
+        category_customers = [c for c in customers if str(c.get('group_name') or 'General').strip() == selected_group]
+    else:
+        category_customers = customers
+
+    # Fetch or compute overview metrics dynamically for the selected category
     overview_data = None
     if is_healthy:
         try:
-            o_res = requests.get(f"{BACKEND_URL}/sales/overview-metrics", timeout=10)
+            params = {}
+            if selected_group != "All":
+                params["group"] = selected_group
+            o_res = requests.get(f"{BACKEND_URL}/sales/overview-metrics", params=params, timeout=10)
             if o_res.status_code == 200:
                 overview_data = o_res.json()
         except Exception:
             pass
 
     if not overview_data:
-        tot_c = len(customers)
-        tot_s = sum(c.get('total_sales', 0.0) for c in customers)
-        tot_d = sum(c.get('current_dues', 0.0) for c in customers)
-        tot_p = sum(c.get('company_payable', c.get('credit_amount', 0.0)) for c in customers)
-        act_c = sum(1 for c in customers if c.get('total_sales', 0.0) > 0)
+        tot_c = len(category_customers)
+        tot_s = sum(c.get('total_sales', 0.0) for c in category_customers)
+        tot_d = sum(c.get('current_dues', 0.0) for c in category_customers)
+        tot_p = sum(c.get('company_payable', c.get('credit_amount', 0.0)) for c in category_customers)
+        act_c = sum(1 for c in category_customers if c.get('total_sales', 0.0) > 0)
 
         specs = [
             ('0_to_2L', '0 to 2 Lakh', 0.0, 200000.0),
@@ -260,11 +309,11 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         bins_list = []
         for bid, blabel, bmin, bmax in specs:
             if bmax == float('inf'):
-                in_b = [c for c in customers if c.get('total_sales', 0.0) > bmin]
+                in_b = [c for c in category_customers if c.get('total_sales', 0.0) > bmin]
             elif bmin == 0.0:
-                in_b = [c for c in customers if 0.0 <= c.get('total_sales', 0.0) <= bmax]
+                in_b = [c for c in category_customers if 0.0 <= c.get('total_sales', 0.0) <= bmax]
             else:
-                in_b = [c for c in customers if bmin < c.get('total_sales', 0.0) <= bmax]
+                in_b = [c for c in category_customers if bmin < c.get('total_sales', 0.0) <= bmax]
             b_cnt = len(in_b)
             b_sales = sum(c.get('total_sales', 0.0) for c in in_b)
             bins_list.append({
@@ -284,19 +333,20 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             'total_dues': round(tot_d, 2),
             'total_payable': round(tot_p, 2),
             'net_receivable': round(tot_d - tot_p, 2),
-            'total_orders': sum(c.get('total_orders', 0) for c in customers),
+            'total_orders': sum(c.get('total_orders', 0) for c in category_customers),
             'customer_sales_bins': bins_list,
         }
 
-    # Top Executive KPI Cards
-    st.markdown("### 📊 Sales Overview & Key Metrics")
+    # Top Executive KPI Cards (Filtered by Category)
+    cat_title_suffix = f" — {selected_group}" if selected_group != "All" else " (All Categories)"
+    st.markdown(f"### 📊 Sales Overview & Calculations{cat_title_suffix}")
     col_k1, col_k2, col_k3, col_k4 = st.columns(4)
     with col_k1:
         st.metric(
             "👥 Total Customers",
             f"{overview_data['total_customers']:,}",
             delta=f"{overview_data['active_customers']} Active Buyers",
-            help="Total registered parties across MARG Master Ledger & Product Sales Ledger."
+            help=f"Total customer accounts in {selected_group} across MARG Master Ledger & Product Sales Ledger."
         )
     with col_k2:
         tot_sales_val = overview_data['total_sales']
@@ -305,7 +355,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             "💰 Total Sale",
             f"₹{tot_sales_val:,.2f}",
             delta=f"₹{tot_sales_lakh:.2f} Lakhs",
-            help="Aggregate historical transaction value extracted from MARG sales data."
+            help=f"Aggregate sales turnover for customer category '{selected_group}'."
         )
     with col_k3:
         tot_dues_val = overview_data['total_dues']
@@ -314,7 +364,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             "💳 Customer Dues (Debit)",
             f"₹{tot_dues_val:,.2f}",
             delta=f"₹{tot_dues_lakh:.2f} Lakhs",
-            help="Total outstanding amount customers owe to the company from Master Ledger (Debit)."
+            help=f"Total outstanding amount owed by customers in '{selected_group}' (Debit)."
         )
     with col_k4:
         tot_pay_val = overview_data['total_payable']
@@ -323,22 +373,22 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             "🏢 Company Payable (Credit)",
             f"₹{tot_pay_val:,.2f}",
             delta=f"₹{tot_pay_lakh:.2f} Lakhs",
-            help="Total liabilities / credit balance the company owes to parties (Credit)."
+            help=f"Total liability / credit amount company owes to customers in '{selected_group}' (Credit)."
         )
 
-    # Customer Categorization Widget by Sales Slabs (Bins)
-    st.markdown("""
+    # Customer Categorization Widget by Sales Slabs (Filtered by Category)
+    st.markdown(f"""
     <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 10px; padding: 12px 16px; margin-top: 14px; margin-bottom: 12px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div style="font-size: 1.05rem; font-weight: 700; color: #0F172A;">
-                🏷️ Customer Category by Sales Slabs (Revenue Bins)
+                🏷️ Customer Category by Sales Slabs{cat_title_suffix}
             </div>
             <div style="font-size: 0.82rem; color: #475569; font-weight: 600;">
                 Bins: 0–2 Lakh | >2–5 Lakh | >5–8 Lakh | >8–12 Lakh | >12–20 Lakh | >20 Lakh
             </div>
         </div>
         <div style="font-size: 0.83rem; color: #475569; margin-top: 3px;">
-            Distribution of customers based on total historical purchases transacted in MARG ERP.
+            Distribution of customers in <b>{selected_group}</b> segmented by historical purchases. Click any slab to filter customer selection.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -361,7 +411,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                 <div style="font-size: 0.82rem; font-weight: 700; color: #334155; margin-bottom: 2px;">{b_item['bin_label']}</div>
                 <div style="font-size: 1.25rem; font-weight: 800; color: {border_c};">{b_cnt} <span style="font-size: 0.72rem; font-weight: 500; color: #64748B;">({b_cpct}%)</span></div>
                 <div style="font-size: 0.85rem; font-weight: 700; color: #1E293B; margin-top: 4px;">₹{b_sales_l:,.2f} L</div>
-                <div style="font-size: 0.70rem; color: #64748B;">{b_spct}% of revenue</div>
+                <div style="font-size: 0.70rem; color: #64748B;">{b_spct}% of sales</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -370,54 +420,19 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     bin_label_to_codes = {b['bin_label']: set(b['customer_codes']) for b in bins_list}
 
     selected_slab = st.segmented_control(
-        "🎯 Filter Customer Selection by Sales Slab:",
+        f"🎯 Filter Customers in {selected_group} by Sales Slab:",
         options=bin_options,
         default="All Slabs",
-        key="sales_selected_slab_control"
+        key=f"sales_selected_slab_control_{selected_group}"
     )
 
     st.markdown("---")
 
-    # Section 3: Cascading Category / Group and Customer Selector Dropdowns
-    st.markdown("### 👤 Select Customer by Category / Group")
-
-    # Extract distinct groups from customer list (populated from Excel 'Group' column)
-    all_groups = []
-    seen_groups = set()
-    group_counts = {}
-    for c in customers:
-        grp = str(c.get('group_name') or 'General').strip()
-        group_counts[grp] = group_counts.get(grp, 0) + 1
-        if grp and grp not in seen_groups:
-            all_groups.append(grp)
-            seen_groups.add(grp)
-    all_groups.sort()
-
-    # Format group options with live counts
-    group_display_map = {
-        "All": f"All Categories / Groups ({len(customers)})"
-    }
-    for g in all_groups:
-        group_display_map[g] = f"{g} ({group_counts.get(g, 0)})"
-
-    raw_group_choices = ["All"] + all_groups
-
-    col_cat, col_cust = st.columns([1, 2])
-    with col_cat:
-        selected_group = st.selectbox(
-            "1️⃣ Category / Group (from Excel 'Group'):",
-            options=raw_group_choices,
-            format_func=lambda x: group_display_map.get(x, x),
-            key="sales_selected_group_dropdown"
-        )
-
-    # Filter customers by selected group
-    if selected_group != "All":
-        filtered_customers = [c for c in customers if str(c.get('group_name') or 'General').strip() == selected_group]
-    else:
-        filtered_customers = customers
+    # Section 3: Customer Selector Dropdown
+    st.markdown("### 👤 Select Customer for Detailed Intelligence")
 
     # Further filter by selected sales slab if a specific slab is selected
+    filtered_customers = category_customers
     if selected_slab and selected_slab != "All Slabs":
         allowed_codes = bin_label_to_codes.get(selected_slab, set())
         filtered_customers = [c for c in filtered_customers if c['customer_code'] in allowed_codes]
@@ -425,7 +440,6 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     if not filtered_customers:
         st.warning(f"No customers found matching Category '{selected_group}' and Sales Slab '{selected_slab}'.")
         return
-
 
     cust_options = []
     cust_code_map = {}
@@ -445,16 +459,16 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         cust_options.append(label)
         cust_code_map[label] = code
 
-    with col_cust:
-        selected_label = st.selectbox(
-            f"2️⃣ Customer ({len(filtered_customers)} in this category):",
-            options=cust_options,
-            key="sales_selected_customer_label"
-        )
+    selected_label = st.selectbox(
+        f"👤 Select Customer ({len(filtered_customers)} accounts in {selected_group}" + (f", Slab: {selected_slab}" if selected_slab != "All Slabs" else "") + "):",
+        options=cust_options,
+        key="sales_selected_customer_label"
+    )
 
     selected_code = cust_code_map.get(selected_label)
     if not selected_code:
         return
+
 
     # Section 4: Fetch Customer Summary
     summary = {}

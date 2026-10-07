@@ -146,7 +146,7 @@ class SalesIntelligenceService:
             })
         return sorted(results, key=lambda x: x['customer_name'].upper())
 
-    def get_sales_dashboard_overview(self) -> dict[str, Any]:
+    def get_sales_dashboard_overview(self, group: Optional[str] = None) -> dict[str, Any]:
         """
         Computes executive sales dashboard overview KPIs and customer category bins by sales volume:
         - total_customers
@@ -164,7 +164,7 @@ class SalesIntelligenceService:
             - '>12 to 20 Lakh': 1,200,000 < sales <= 2,000,000
             - '>20 Lakh': sales > 2,000,000
         """
-        custs = self.list_customers(limit=10000)
+        custs = self.list_customers(group=group, limit=10000)
         tot_customers = len(custs)
         tot_sales = sum(c.get('total_sales', 0.0) for c in custs)
         tot_dues = sum(c.get('current_dues', 0.0) for c in custs)
