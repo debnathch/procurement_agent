@@ -516,10 +516,14 @@ def list_inventory(
             healthy_no_reorder_codes = {
                 p['product_code'] for p in no_reorder_items
                 if p.get('expiry_action') != 'PAUSE_PROCUREMENT'
+                and p.get('near_expiry_qty', 0) <= 0
+                and p.get('expired_qty', 0) <= 0
             }
             healthy_no_reorder_names = {
                 str(p.get('product_name', '')).strip().upper() for p in no_reorder_items
                 if p.get('expiry_action') != 'PAUSE_PROCUREMENT'
+                and p.get('near_expiry_qty', 0) <= 0
+                and p.get('expired_qty', 0) <= 0
             }
         except Exception as e:
             logger.warning(f"Could not calculate no-reorder exclusions for inventory: {e}")

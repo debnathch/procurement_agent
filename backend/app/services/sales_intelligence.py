@@ -18,6 +18,7 @@ from backend.app.models.entities import (
     Customer, CustomerReceivable, SalesHistory, InventoryBatch, Product
 )
 from backend.app.adapters.excel import pharma_canonical_key
+from backend.app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -304,11 +305,12 @@ class SalesIntelligenceService:
     def get_customer_recommendations(self, customer_code: str) -> dict[str, list[dict[str, Any]]]:
         """
         Computes tailored product recommendations for the selected customer:
-        1. Near-Expiry Opportunities (Expiry <= 90 days for products this customer buys)
+        1. Near-Expiry Opportunities (Expiry <= configured horizon days, default 180, for products this customer buys)
         2. Regular Reorder Candidates (Frequently bought items due for replenishment)
         """
         now = datetime.utcnow()
-        horizon_90 = now + timedelta(days=90)
+        horizon_days = int(getattr(settings, 'expiry_risk_horizon_days', 180)) if settings else 180
+        horizon_dt = now + timedelta(days=horizon_days)
 
         # 1. Find all products historically purchased by this customer
         customer = self.db.scalars(
@@ -368,7 +370,7 @@ class SalesIntelligenceService:
 
             # Check Near-Expiry Opportunities
             for b in avail_batches:
-                if b.expiry_date and now < b.expiry_date <= horizon_90:
+                if b.expiry_date and now < b.expiry_date <= horizon_dt:
                     days_remaining = (b.expiry_date - now).days
                     suggested_qty = min(typical_qty, b.qty_on_hand)
                     if suggested_qty <= 0:

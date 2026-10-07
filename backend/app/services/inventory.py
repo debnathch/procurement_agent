@@ -4,7 +4,7 @@ Inventory Position & FEFO Expiry Analysis Service
 Aggregates inventory batches across First-Expiry-First-Out (FEFO) lifecycle stages:
 - Active On-Hand: Physical units currently stocked in the warehouse.
 - Pipeline On-Order: Units committed in pending purchase orders.
-- Near-Expiry Batches: Units expiring within the configured risk horizon (default: 90 days).
+- Near-Expiry Batches: Units expiring within the configured risk horizon (default: 180 days).
 - Expired Stock: Units past their shelf-life validity (excluded from usable inventory).
 - Usable Before Expiry: Realistic quantity consumable before batch expiration based on daily demand.
 """
@@ -65,7 +65,7 @@ class InventoryService:
            - on_hand: Total physical quantity.
            - on_order: Confirmed pipeline quantity.
            - expired: Batches with expiry_date < current UTC time.
-           - near_expiry: Batches with current UTC time <= expiry_date <= risk_horizon (90 days).
+           - near_expiry: Batches with current UTC time <= expiry_date <= risk_horizon (180 days).
            - usable_before_expiry: Stock safe from expiration during expected consumption.
         4. Compute expiry_risk fraction = near_expiry / on_hand.
         5. Assign operational expiry action recommendation:

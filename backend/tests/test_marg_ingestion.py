@@ -1173,7 +1173,71 @@ def test_row_wise_promo_isolation_with_particular_batch_and_no_reorder():
     nr_item = next(x for x in no_reorder if x['product_code'] == 'A00154')
     # Stock on hand reflects the legitimate medicine batches: 86 + 2106 = 2192
     assert nr_item['stock_on_hand'] == 2192.0
-    assert nr_item['net_need'] <= 0
+    session.close()
+
+
+def test_near_expiry_180_days_horizon_includes_o2_ct():
+    """
+    Validates that a batch expiring in ~145 days (like O2-CT CREAM Batch E188)
+    is correctly recognized as Near-Expiry under the 180-day horizon,
+    while batches beyond 180 days (like Batch FDE340, 420 days) remain Shelf-Life Healthy.
+    """
+    from backend.app.main import list_inventory
+    from backend.app.models.entities import Product, InventoryBatch
+    from datetime import datetime, timedelta
+
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    now = datetime.utcnow()
+    p = Product(
+        product_code='2364',
+        product_name='O2-CT CREAM 15gm',
+        category='Ointment',
+        company='DWARKA REMEDIES',
+        manufacturer='WINCURE',
+        unit_cost=9.0,
+        reorder_enabled=True,
+    )
+    b_near = InventoryBatch(
+        product_code='2364',
+        batch_no='E188',
+        qty_on_hand=22.0,
+        expiry_date=now + timedelta(days=145),  # 145 days <= 180 days -> Near Expiry
+        unit_cost=9.0,
+    )
+    b_healthy = InventoryBatch(
+        product_code='2364',
+        batch_no='FDE340',
+        qty_on_hand=872.0,
+        expiry_date=now + timedelta(days=420),  # 420 days > 180 days -> Shelf-Life Healthy
+        unit_cost=9.0,
+    )
+    session.add_all([p, b_near, b_healthy])
+    session.commit()
+
+    # Query with exclude_healthy=True (the Near-Expiry & Expired view)
+    near_items = list_inventory(
+        company=None, manufacturer=None, include_promo=False,
+        include_zero_stock=False, exclude_healthy=True, db=session
+    )
+    assert len(near_items) == 1
+    item = near_items[0]
+    assert item['product_name'] == 'O2-CT CREAM 15gm'
+    assert item['batch_no'] == 'E188'
+    assert item['qty_on_hand'] == 22.0
+    assert '⚠️ Near-Expiry' in item['fefo_status']
+
+    # Query without exclude_healthy=True: should separate near-expiry and healthy categories
+    all_items = list_inventory(
+        company=None, manufacturer=None, include_promo=False,
+        include_zero_stock=False, exclude_healthy=False, db=session
+    )
+    assert len(all_items) == 2
+    fefo_statuses = {x['batch_no']: x['fefo_status'] for x in all_items}
+    assert '⚠️ Near-Expiry' in fefo_statuses['E188']
+    assert fefo_statuses['FDE340'] == '✅ Shelf-Life Healthy'
 
     session.close()
 

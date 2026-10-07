@@ -19,14 +19,14 @@ class ProcurementPolicy:
     Attributes:
         review_days (int): Interval between procurement review cycles (default: 7 days).
         safety_days (int): Buffer days to protect against supplier stockouts or transit delays (default: 3 days).
-        expiry_risk_horizon_days (int): Lookahead window to identify near-expiry batches (default: 90 days).
+        expiry_risk_horizon_days (int): Lookahead window to identify near-expiry batches (default: 180 days).
     """
 
     def __init__(
         self,
         review_days: int = 7,
         safety_days: int = 3,
-        expiry_risk_horizon_days: int = 90,
+        expiry_risk_horizon_days: int = 180,
     ) -> None:
         """
         Initialize policy calculation parameters.
