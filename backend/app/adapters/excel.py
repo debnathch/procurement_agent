@@ -335,6 +335,57 @@ def pharma_canonical_key(name: str) -> str:
     return f'{base}_{form}_{vol}'
 
 
+def normalize_customer_name(name: str | None) -> str:
+    """
+    Normalizes customer/party names for consistent matching and clean display:
+    1. Strips leading and trailing whitespace, tabs, and unicode spaces.
+    2. Converts multiple consecutive spaces/tabs to a single space.
+    3. Normalizes unicode dashes (–, —) to standard hyphen (-).
+    4. Strips trailing dots, hyphens, commas, or periods at the very end of the name
+       (e.g., 'ABHISHEK DAS- ETHICAL .' -> 'ABHISHEK DAS - ETHICAL').
+    5. Cleans up spaces around hyphens and slashes: ' - ' -> ' - '.
+    6. Converts to clean uppercase for consistent display and indexing.
+    """
+    if not name or pd.isna(name):
+        return ""
+    s = str(name).strip()
+    s = s.replace('\u00a0', ' ').replace('\u2013', '-').replace('\u2014', '-')
+    s = re.sub(r'^\s*M\s*/\s*S\.?\s*', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s*-\s*', ' - ', s)
+    s = re.sub(r'[\s\.\,\-]+$', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s.upper()
+
+
+def customer_canonical_key(name: str | None) -> str:
+    """
+    Computes a canonical alphanumeric representation of a customer name
+    to guarantee exact matching between Master Customer Ledger and
+    Product-Wise Customer Ledger regardless of spaces, dots, dashes, slashes, or case.
+
+    Examples:
+        'A.B. MEDICINE CENTRE-THIRDPARTPURBA BURDWAN' -> 'ABMEDICINECENTRETHIRDPARTPURBABURDWAN'
+        'A.B. MEDICINE CENTRE - THIRDPART PURBA BURDWAN' -> 'ABMEDICINECENTRETHIRDPARTPURBABURDWAN'
+        '1ST JULY 2026 - DIGHA' -> '1STJULY2026DIGHA'
+        '1ST JULY 2026-DIGHA' -> '1STJULY2026DIGHA'
+        'ABHISHEK DAS- ETHICAL .' -> 'ABHISHEKDASETHICAL'
+    """
+    if not name or pd.isna(name):
+        return ""
+    norm = normalize_customer_name(name)
+    return re.sub(r'[^A-Z0-9]', '', norm)
+
+
+def generate_customer_code(name: str | None) -> str:
+    """
+    Generates a deterministic customer code from the canonical customer identity.
+    Produces identical customer codes for the same party across both Excels.
+    """
+    key = customer_canonical_key(name)
+    if not key:
+        return f"CUST-{abs(hash(str(name or ''))) % 100000:05d}"
+    return f"CUST-{key[:40]}"
+
 
 def is_footer_or_junk_row(name: str) -> bool:
     """
@@ -1178,14 +1229,13 @@ class MargExcelParser:
 
                 # If no quantity, this is a Party Name header
                 if qty <= 0 and amt <= 0:
-                    current_party = re.sub(r'\s+', ' ', val0).strip()
+                    current_party = normalize_customer_name(val0)
                     continue
 
                 # If we have a quantity, this is a product line under current_party
                 if current_party and (qty > 0 or amt > 0):
                     c_name = current_party
-                    c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
-                    c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
+                    c_code = generate_customer_code(c_name)
                     code = _make_stable_code(val0)
 
                     out['sales_history'].append({
@@ -1230,11 +1280,11 @@ class MargExcelParser:
             rate = _parse_float(row.get(rate_col), 0.0) if rate_col else 0.0
             amt  = _parse_float(row.get(amt_col), 0.0) if amt_col else (total_sold * rate)
 
-            c_name = _clean_str(row.get(cust_name_col)) if cust_name_col else banner_party
+            raw_c_name = row.get(cust_name_col) if cust_name_col else banner_party
+            c_name = normalize_customer_name(raw_c_name) if raw_c_name else None
             c_code = _clean_str(row.get(cust_code_col)) if cust_code_col else None
             if not c_code and c_name:
-                c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
-                c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
+                c_code = generate_customer_code(c_name)
 
             inv_no = _clean_str(row.get(inv_no_col)) if inv_no_col else None
             row_date = parse_expiry_date(row.get(date_col)) if date_col else end_date
@@ -1380,22 +1430,22 @@ class MargExcelParser:
                     pass
 
         for row in df.to_dict('records'):
-            party_name = _clean_str(
+            raw_party_name = (
                 row.get('customer_name') or
                 row.get('party_name') or
                 row.get('product_name') or
                 row.get('supplier_name') or
                 row.get('debtor_name')
             )
-            if not party_name or party_name.upper() in ('TOTAL', 'GRAND TOTAL', 'NAN', 'NONE'):
+            party_name = normalize_customer_name(raw_party_name)
+            if not party_name or is_footer_or_junk_row(party_name):
                 continue
 
             c_code = _clean_str(row.get('customer_code') or row.get('party_code'))
             if c_code:
                 party_id = c_code
             else:
-                clean_slug = re.sub(r'[^A-Za-z0-9]', '', party_name)[:10].upper()
-                party_id = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(party_name)) % 10000:04d}"
+                party_id = generate_customer_code(party_name)
 
             cr_days = int(_parse_float(row.get('lead_time_days'), settings.default_lead_time_days))
             mr_name = _clean_str(row.get('channel') or row.get('salesperson') or row.get('salesman'))
@@ -1521,7 +1571,7 @@ class MargExcelParser:
         seen_codes = {c['customer_code'] for c in out['customers']}
         now_dt = datetime.utcnow()
         for row in df.to_dict('records'):
-            name = _clean_str(
+            raw_name = (
                 row.get('customer_name') or
                 row.get('party_name') or
                 row.get('debtor_name') or
@@ -1529,6 +1579,7 @@ class MargExcelParser:
                 row.get('supplier_name') or
                 row.get('product_name')
             )
+            name = normalize_customer_name(raw_name)
             if not name or is_footer_or_junk_row(name):
                 continue
             code = _clean_str(
@@ -1540,13 +1591,7 @@ class MargExcelParser:
                 row.get('supplier_id')
             )
             if not code:
-                clean_slug = re.sub(r'[^A-Za-z0-9]', '', name)[:25].upper()
-                base_code = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(name)) % 100000:05d}"
-                code = base_code
-                cnt = 1
-                while code in seen_codes:
-                    code = f"{base_code[:20]}-{cnt}"
-                    cnt += 1
+                code = generate_customer_code(name)
 
             clean_row = {_clean_alpha(k): v for k, v in row.items()}
 
@@ -1812,11 +1857,11 @@ class MargExcelParser:
             sale_dt = parse_expiry_date(date_val) or datetime.utcnow()
             qty = _parse_float(row.get('qty_sold'), 0.0)
             if qty > 0:
-                c_name = _clean_str(row.get('customer_name') or row.get('party_name') or row.get('supplier_name') or row.get('debtor_name'))
+                raw_c_name = row.get('customer_name') or row.get('party_name') or row.get('supplier_name') or row.get('debtor_name')
+                c_name = normalize_customer_name(raw_c_name) if raw_c_name else None
                 c_code = _clean_str(row.get('customer_code') or row.get('party_code'))
                 if not c_code and c_name:
-                    c_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
-                    c_code = f"CUST-{c_slug}" if c_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
+                    c_code = generate_customer_code(c_name)
 
                 inv_no = _clean_str(row.get('invoice_no') or row.get('bill_no') or row.get('voucherno'))
                 batch_val = _clean_str(row.get('batch_no') or row.get('bno'))

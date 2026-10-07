@@ -648,3 +648,177 @@ def test_hierarchical_marg_party_product_wise_sales_ledger():
     session.close()
 
 
+def test_cross_excel_customer_name_normalization_and_mapping():
+    """
+    Test that variations in customer names across Master Customer Ledger and
+    Product-Wise Customer Ledger are normalized and mapped to the same customer:
+    - Normalizes honorifics (M/S), trailing dots, hyphen spacing, and case.
+    - Matches canonical keys so both files link to the exact same Customer record.
+    - Preserves Customer Dues (Debit) and Company Liable to Pay (Credit).
+    - Links Product Purchase History to the single unified customer.
+    - Prevents duplicate customer creation.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    p1 = Product(
+        product_code='MED-ENRON-8',
+        product_name='ENRON-8 TAB ALU ALU 10X10',
+        category='Tablets',
+        company='Ben Remedies',
+        unit='box',
+        unit_cost=150.0,
+        reorder_enabled=True,
+    )
+    p2 = Product(
+        product_code='MED-PETALIFE-D',
+        product_name='PETALIFE-D TAB 10x10',
+        category='Tablets',
+        company='Ben Remedies',
+        unit='box',
+        unit_cost=80.0,
+        reorder_enabled=True,
+    )
+    session.add_all([p1, p2])
+    session.commit()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # Master Excel with formatting variations:
+    # 1. "A.B. MEDICINE CENTRE-THIRDPARTPURBA BURDWAN" (no hyphen space, merged words)
+    # 2. "M/S MAA TARA MEDICAL STORE - BURDWAN ." (honorific M/S, trailing dot)
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'A.B. MEDICINE CENTRE-THIRDPARTPURBA BURDWAN',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 45000.0,
+            'Credit': 500.0,
+        },
+        {
+            'Ledger': 'M/S MAA TARA MEDICAL STORE - BURDWAN .',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 12000.0,
+            'Credit': 0.0,
+        }
+    ])
+    buf_master = io.BytesIO()
+    master_df.to_excel(buf_master, index=False)
+    ingest_svc.ingest_excel(buf_master.getvalue(), filename='CUSTOMER_MASTER_LEDGER.XLS')
+
+    # Product-wise Excel with different formatting of same customers:
+    # 1. "A.B. MEDICINE CENTRE - THIRDPART PURBA BURDWAN" (spaced hyphen & words)
+    # 2. "MAA TARA MEDICAL STORE-BURDWAN" (no honorific M/S, no trailing dot, compact hyphen)
+    hierarchical_data = [
+        {'Party/Product Name': 'Party/Product Wise Net Sales From 01/04/2026 To 03/10/2026', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'BEN REMEDIES', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        # Party 1: A.B. Medicine Centre
+        {'Party/Product Name': 'A.B. MEDICINE CENTRE - THIRDPART PURBA BURDWAN', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'ENRON-8 TAB ALU ALU 10X10', 'Sale Qty': 60.0, 'Ret Qty': 0.0, 'Net Qty': 60.0},
+        {'Party/Product Name': 'PETALIFE-D TAB 10x10', 'Sale Qty': 40.0, 'Ret Qty': 0.0, 'Net Qty': 40.0},
+        {'Party/Product Name': 'Party Total :', 'Sale Qty': 100.0, 'Ret Qty': 0.0, 'Net Qty': 100.0},
+        # Party 2: Maa Tara Medical Store
+        {'Party/Product Name': 'MAA TARA MEDICAL STORE-BURDWAN', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'ENRON-8 TAB ALU ALU 10X10', 'Sale Qty': 25.0, 'Ret Qty': 0.0, 'Net Qty': 25.0},
+        {'Party/Product Name': 'Party Total :', 'Sale Qty': 25.0, 'Ret Qty': 0.0, 'Net Qty': 25.0},
+    ]
+    buf_prod = io.BytesIO()
+    pd.DataFrame(hierarchical_data).to_excel(buf_prod, index=False)
+    ingest_svc.ingest_excel(buf_prod.getvalue(), filename='CUSTOMER_PRODUCT_LEDGER.XLS')
+
+    # Assert exactly 2 customers exist in database (no duplicates!)
+    customers = session.query(Customer).all()
+    assert len(customers) == 2, f"Expected 2 unique customers, found {len(customers)}: {[c.customer_name for c in customers]}"
+
+    # Check Customer 1 (A.B. MEDICINE CENTRE)
+    cust_ab = next(c for c in customers if 'MEDICINE CENTRE' in c.customer_name)
+    summary_ab = sales_svc.get_customer_summary(cust_ab.customer_code)
+    assert summary_ab['current_dues'] == 45000.0
+    assert summary_ab['company_payable'] == 500.0
+    assert summary_ab['net_receivable'] == 44500.0
+    assert summary_ab['total_orders'] == 2
+    assert summary_ab['total_sales'] == (60 * 150.0) + (40 * 80.0)
+    assert len(summary_ab['recent_orders']) == 2
+
+    # Check Customer 2 (MAA TARA MEDICAL STORE)
+    cust_tara = next(c for c in customers if 'MAA TARA' in c.customer_name)
+    summary_tara = sales_svc.get_customer_summary(cust_tara.customer_code)
+    assert summary_tara['current_dues'] == 12000.0
+    assert summary_tara['company_payable'] == 0.0
+    assert summary_tara['total_orders'] == 1
+    assert summary_tara['total_sales'] == (25 * 150.0)
+    assert len(summary_tara['recent_orders']) == 1
+
+    session.close()
+
+
+def test_cross_excel_reverse_upload_order_mapping():
+    """
+    Test that when Product-Wise Customer Ledger is uploaded FIRST,
+    and Master Customer Ledger is uploaded SECOND, customer mapping still succeeds:
+    - Products and sales history attach to the customer.
+    - Master ledger enriches the same customer with Group, Dues (Debit), and Credit.
+    - No duplicate customer records are created.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    p1 = Product(
+        product_code='MED-ENRON-8',
+        product_name='ENRON-8 TAB ALU ALU 10X10',
+        category='Tablets',
+        company='Ben Remedies',
+        unit='box',
+        unit_cost=150.0,
+        reorder_enabled=True,
+    )
+    session.add(p1)
+    session.commit()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # 1. Product ledger uploaded first
+    hierarchical_data = [
+        {'Party/Product Name': 'Party/Product Wise Net Sales From 01/04/2026 To 03/10/2026', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'A.B. MEDICINE CENTRE - THIRDPART PURBA BURDWAN', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'ENRON-8 TAB ALU ALU 10X10', 'Sale Qty': 50.0, 'Ret Qty': 0.0, 'Net Qty': 50.0},
+        {'Party/Product Name': 'Party Total :', 'Sale Qty': 50.0, 'Ret Qty': 0.0, 'Net Qty': 50.0},
+    ]
+    buf_prod = io.BytesIO()
+    pd.DataFrame(hierarchical_data).to_excel(buf_prod, index=False)
+    ingest_svc.ingest_excel(buf_prod.getvalue(), filename='CUSTOMER_PRODUCT_LEDGER.XLS')
+
+    # 2. Master ledger uploaded second with name variation
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'A.B. MEDICINE CENTRE-THIRDPARTPURBA BURDWAN',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 38000.0,
+            'Credit': 200.0,
+        }
+    ])
+    buf_master = io.BytesIO()
+    master_df.to_excel(buf_master, index=False)
+    ingest_svc.ingest_excel(buf_master.getvalue(), filename='CUSTOMER_MASTER_LEDGER.XLS')
+
+    # Check database: exactly 1 customer
+    customers = session.query(Customer).all()
+    assert len(customers) == 1, f"Expected 1 unique customer, found {len(customers)}"
+
+    cust = customers[0]
+    assert cust.group_name == 'RETAIL CHEMIST'
+
+    summary = sales_svc.get_customer_summary(cust.customer_code)
+    assert summary['current_dues'] == 38000.0
+    assert summary['company_payable'] == 200.0
+    assert summary['net_receivable'] == 37800.0
+    assert summary['total_orders'] == 1
+    assert summary['total_sales'] == 50 * 150.0
+
+    session.close()
+
+
+

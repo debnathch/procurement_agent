@@ -20,7 +20,92 @@ from backend.app.models.entities import (
     Customer, CustomerReceivable
 )
 from backend.app.services.audit import audit
-from backend.app.adapters.excel import MargExcelParser
+from backend.app.adapters.excel import (
+    MargExcelParser, normalize_customer_name, customer_canonical_key, generate_customer_code
+)
+
+
+class CustomerResolver:
+    """
+    Bidirectional customer resolver across Master Customer Ledger and Product-Wise Customer Ledger.
+    Normalizes customer names and guarantees that both Excels link to the exact same Customer record
+    and customer_code, so that Customer Dues (Debit), Company Liable to Pay (Credit), and Product
+    Sales History are unified under the exact same customer.
+    """
+
+    def __init__(self, db: Session):
+        self.db = db
+        self.code_map: dict[str, Customer] = {}
+        self.canonical_map: dict[str, Customer] = {}
+        self.norm_name_map: dict[str, Customer] = {}
+        self.slug25_map: dict[str, Customer] = {}
+        self._refresh()
+
+    def _refresh(self):
+        custs = self.db.scalars(select(Customer)).all()
+        self.code_map = {c.customer_code: c for c in custs if c.customer_code}
+        self.canonical_map = {customer_canonical_key(c.customer_name): c for c in custs if c.customer_name}
+        self.norm_name_map = {normalize_customer_name(c.customer_name): c for c in custs if c.customer_name}
+        self.slug25_map = {customer_canonical_key(c.customer_name)[:25]: c for c in custs if c.customer_name}
+
+    def register_customer(self, cust: Customer):
+        """Registers an added or updated customer in the lookup maps."""
+        if cust.customer_code:
+            self.code_map[cust.customer_code] = cust
+        if cust.customer_name:
+            ck = customer_canonical_key(cust.customer_name)
+            self.canonical_map[ck] = cust
+            self.norm_name_map[normalize_customer_name(cust.customer_name)] = cust
+            if len(ck) >= 25:
+                self.slug25_map[ck[:25]] = cust
+
+    def resolve(self, raw_name: str | None, raw_code: str | None = None) -> tuple[str, str]:
+        """
+        Resolves customer name or code to (canonical_customer_code, canonical_customer_name).
+        Matching hierarchy:
+        1. Exact Customer Code in DB
+        2. Exact Canonical Key match (punctuation & space-insensitive, e.g. ABMEDICINECENTRETHIRDPARTPURBABURDWAN)
+        3. Normalized Name match
+        4. 25-character slug prefix match (for backwards-compatibility with legacy slugs)
+        5. Substring / containment match for party names (len >= 12)
+        6. Default: deterministic generate_customer_code(norm_name)
+        """
+        if not raw_name and not raw_code:
+            return "CUST-GENERAL", "General Customer"
+
+        c_name = normalize_customer_name(raw_name or "")
+        c_canon = customer_canonical_key(raw_name or "")
+
+        # 1. Exact Customer Code
+        if raw_code and raw_code in self.code_map:
+            c = self.code_map[raw_code]
+            return c.customer_code, c.customer_name
+
+        # 2. Canonical Key Match (e.g. ABMEDICINECENTRETHIRDPARTPURBABURDWAN)
+        if c_canon and c_canon in self.canonical_map:
+            c = self.canonical_map[c_canon]
+            return c.customer_code, c.customer_name
+
+        # 3. Normalized Name Match
+        if c_name and c_name in self.norm_name_map:
+            c = self.norm_name_map[c_name]
+            return c.customer_code, c.customer_name
+
+        # 4. 25-char slug match
+        if c_canon and len(c_canon) >= 25 and c_canon[:25] in self.slug25_map:
+            c = self.slug25_map[c_canon[:25]]
+            return c.customer_code, c.customer_name
+
+        # 5. Substring match for names with length >= 12
+        if c_canon and len(c_canon) >= 12:
+            for ex_canon, c in self.canonical_map.items():
+                if len(ex_canon) >= 12 and (c_canon in ex_canon or ex_canon in c_canon):
+                    return c.customer_code, c.customer_name
+
+        # 6. Fallback: generate deterministic code and normalized name
+        det_code = generate_customer_code(c_name) if c_name else (raw_code or "CUST-UNKNOWN")
+        det_name = c_name if c_name else (raw_code or "Unknown Customer")
+        return det_code, det_name
 
 
 class IngestionService:
@@ -412,19 +497,29 @@ class IngestionService:
             stats['batches_inserted'] += len(resolved_batches)
 
         # ── 4. Upsert Customers ──────────────────────────────────────────────
+        # Initialize unified customer resolver
+        customer_resolver = CustomerResolver(self.db)
+
+        # ── 4. Upsert Customers ──────────────────────────────────────────────
         customers_data = parsed.get('customers', [])
         if customers_data:
-            existing_custs = {c.customer_code: c for c in self.db.scalars(select(Customer)).all()}
             for c_data in customers_data:
-                ccode = c_data['customer_code']
-                if ccode in existing_custs:
+                raw_n = c_data.get('customer_name')
+                raw_c = c_data.get('customer_code')
+                resolved_code, resolved_name = customer_resolver.resolve(raw_n, raw_c)
+
+                c_data['customer_code'] = resolved_code
+                c_data['customer_name'] = resolved_name
+
+                existing_c = customer_resolver.code_map.get(resolved_code)
+                if existing_c:
                     for k, v in c_data.items():
                         if v is not None and v != '':
-                            setattr(existing_custs[ccode], k, v)
+                            setattr(existing_c, k, v)
                 else:
                     new_c = Customer(**c_data)
                     self.db.add(new_c)
-                    existing_custs[ccode] = new_c
+                    customer_resolver.register_customer(new_c)
             stats['customers_upserted'] = len(customers_data)
 
         # ── 5. Upsert Receivables ────────────────────────────────────────────
@@ -432,6 +527,13 @@ class IngestionService:
         if receivables_data:
             existing_recs = {r.invoice_no: r for r in self.db.scalars(select(CustomerReceivable)).all()}
             for r_data in receivables_data:
+                raw_n = r_data.get('customer_name')
+                raw_c = r_data.get('customer_code')
+                resolved_code, resolved_name = customer_resolver.resolve(raw_n, raw_c)
+
+                r_data['customer_code'] = resolved_code
+                r_data['customer_name'] = resolved_name
+
                 inv = r_data['invoice_no']
                 if inv in existing_recs:
                     for k, v in r_data.items():
@@ -445,26 +547,9 @@ class IngestionService:
         # ── 6. Insert Sales History ──────────────────────────────────────────
         # product_name is stored as-is from MARG for traceability.
         # product_code is resolved to the canonical code via normalization.
-        # customer_code is resolved against existing customer master records.
+        # customer_code and customer_name are resolved against existing customer master records.
         sales_records = []
         matched_customers = set()
-
-        # Build customer resolution caches
-        all_db_custs = self.db.scalars(select(Customer)).all()
-        cust_name_to_code = {c.customer_name.strip().upper(): c.customer_code for c in all_db_custs if c.customer_name}
-        cust_clean_spaces_to_code = {
-            re.sub(r'\s+', ' ', c.customer_name).strip().upper(): c.customer_code
-            for c in all_db_custs if c.customer_name
-        }
-        cust_slug_to_code = {
-            re.sub(r'[^A-Za-z0-9]', '', c.customer_name)[:25].upper(): c.customer_code
-            for c in all_db_custs if c.customer_name
-        }
-        cust_full_slug_to_code = {
-            re.sub(r'[^A-Za-z0-9]', '', c.customer_name).upper(): c.customer_code
-            for c in all_db_custs if c.customer_name
-        }
-        cust_code_set = {c.customer_code for c in all_db_custs if c.customer_code}
 
         # Pre-load catalog unit costs to populate rate and amount if missing in sales report
         prod_costs = {
@@ -484,39 +569,10 @@ class IngestionService:
             s_rec['product_code'] = resolved_code
             s_rec['product_name'] = raw_name
 
-            # Resolve customer code against customer master
-            c_name = (s_data.get('customer_name') or '').strip()
-            c_code = s_data.get('customer_code')
-
-            resolved_cust_code = None
-            if c_name:
-                c_name_key = c_name.upper()
-                c_clean_key = re.sub(r'\s+', ' ', c_name).strip().upper()
-                c_slug_key = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
-                c_full_slug_key = re.sub(r'[^A-Za-z0-9]', '', c_name).upper()
-
-                if c_name_key in cust_name_to_code:
-                    resolved_cust_code = cust_name_to_code[c_name_key]
-                elif c_clean_key in cust_clean_spaces_to_code:
-                    resolved_cust_code = cust_clean_spaces_to_code[c_clean_key]
-                elif c_slug_key in cust_slug_to_code:
-                    resolved_cust_code = cust_slug_to_code[c_slug_key]
-                elif c_full_slug_key in cust_full_slug_to_code:
-                    resolved_cust_code = cust_full_slug_to_code[c_full_slug_key]
-                else:
-                    for c_clean, c_c_code in cust_clean_spaces_to_code.items():
-                        if len(c_clean_key) > 8 and (c_clean_key in c_clean or c_clean in c_clean_key):
-                            resolved_cust_code = c_c_code
-                            break
-
-            if not resolved_cust_code:
-                if c_code and c_code in cust_code_set:
-                    resolved_cust_code = c_code
-                elif c_code:
-                    resolved_cust_code = c_code
-                elif c_name:
-                    clean_slug = re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()
-                    resolved_cust_code = f"CUST-{clean_slug}" if clean_slug else f"CUST-{abs(hash(c_name)) % 100000:05d}"
+            # Resolve customer code and customer name against customer master
+            raw_c_name = s_data.get('customer_name', '')
+            raw_c_code = s_data.get('customer_code')
+            resolved_cust_code, resolved_cust_name = customer_resolver.resolve(raw_c_name, raw_c_code)
 
             # Fallback for rate & amount from product catalog
             if s_rec.get('rate', 0.0) <= 0:
@@ -526,25 +582,21 @@ class IngestionService:
 
             if resolved_cust_code:
                 s_rec['customer_code'] = resolved_cust_code
+                s_rec['customer_name'] = resolved_cust_name
                 matched_customers.add(resolved_cust_code)
 
                 # If customer is not yet in Customer master, create an active record
-                if resolved_cust_code not in cust_code_set:
+                if resolved_cust_code not in customer_resolver.code_map:
                     new_cust = Customer(
                         customer_code=resolved_cust_code,
-                        customer_name=c_name or resolved_cust_code,
+                        customer_name=resolved_cust_name or resolved_cust_code,
                         group_name='General',
                         district='West Bengal',
                         salesperson='Sales Team',
                         status='ACTIVE',
                     )
                     self.db.add(new_cust)
-                    cust_code_set.add(resolved_cust_code)
-                    if c_name:
-                        cust_name_to_code[c_name.upper()] = resolved_cust_code
-                        cust_clean_spaces_to_code[re.sub(r'\s+', ' ', c_name).strip().upper()] = resolved_cust_code
-                        cust_slug_to_code[re.sub(r'[^A-Za-z0-9]', '', c_name)[:25].upper()] = resolved_cust_code
-                        cust_full_slug_to_code[re.sub(r'[^A-Za-z0-9]', '', c_name).upper()] = resolved_cust_code
+                    customer_resolver.register_customer(new_cust)
                     stats['customers_upserted'] = stats.get('customers_upserted', 0) + 1
 
             sales_records.append(SalesHistory(**s_rec))
