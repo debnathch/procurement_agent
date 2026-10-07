@@ -993,7 +993,7 @@ class MargExcelParser:
             has_explicit_sales_cols or
             has_general_sales_cols or
             ('sale_date' in df_renamed.columns and 'qty_sold' in df_renamed.columns) or
-            (any(c in cleaned_col_names for c in ['itemdescription', 'particulars', 'itemname', 'productname']) and
+            (any(c in cleaned_col_names for c in ['itemdescription', 'particulars', 'itemname', 'productname', 'description', 'desc', 'itemdesc', 'product']) and
              any(c in cleaned_col_names for c in ['quantity', 'qty', 'qtysold', 'soldqty', 'billedqty', 'totalqty']))
         )
 
@@ -1060,7 +1060,11 @@ class MargExcelParser:
         if is_outstanding_sheet:
             cls._extract_outstanding(df_renamed, out)
         elif is_sales_report:
-            cls._extract_sales_summary(df, out, banner_text)
+            header_idx = _find_header_row(df_raw)
+            cls._extract_sales_summary(
+                df, out, banner_text,
+                df_raw=df_raw, header_idx=header_idx, filename=filename, sheet_name=sheet_name
+            )
         elif is_purchase_report:
             cls._extract_purchase_summary(df, out, banner_text)
         elif is_customer_sheet:
@@ -1100,10 +1104,15 @@ class MargExcelParser:
         cls,
         df: pd.DataFrame,
         out: dict[str, list[dict[str, Any]]],
-        banner_text: str
+        banner_text: str,
+        df_raw: pd.DataFrame | None = None,
+        header_idx: int | None = None,
+        filename: str = '',
+        sheet_name: str = '',
     ):
         """
-        Extracts sales lines from MARG Sales Summary (e.g. SALES REPORT.XLS).
+        Extracts sales lines from MARG Sales Summary (e.g. SALES REPORT.XLS) or
+        individual Product-Wise Customer Ledger exports.
         Extracts date range, computes daily demand velocity, and logs sales history.
         """
         seen_products: set[str] = {p['product_code'] for p in out['products']}
@@ -1179,6 +1188,76 @@ class MargExcelParser:
                 if raw_p and len(raw_p) > 2 and raw_p.upper() not in ('STATEMENT', 'REPORT', 'SUMMARY'):
                     banner_party = raw_p
 
+        # If not found via regex prefix, inspect pre-header rows of df_raw (e.g. Row 2 in MARG individual party ledger)
+        if not cust_name_col and not banner_party and df_raw is not None and header_idx is not None and header_idx > 0:
+            known_cust_keys = {
+                customer_canonical_key(c['customer_name']): c['customer_name']
+                for c in out.get('customers', [])
+                if c.get('customer_name')
+            }
+
+            candidate_strings: list[str] = []
+            for r_i in range(min(header_idx, len(df_raw))):
+                for cell_val in df_raw.iloc[r_i].values:
+                    if pd.isna(cell_val):
+                        continue
+                    s = _clean_str(cell_val)
+                    if not s or len(s) < 3:
+                        continue
+                    # Ignore date-only or date-range strings
+                    if re.search(r'^\s*(?:from|period|date|as on|upto|to)\b', s, re.IGNORECASE) or re.search(r'\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}', s):
+                        continue
+                    s_upper = s.upper()
+                    # Ignore company letterhead / company metadata
+                    if any(k in s_upper for k in (
+                        'BEN REMEDIES', 'NETAJI SUBHAS', 'GSTIN', 'PHONE', 'E-MAIL', 'EMAIL', 'D.L.NO', 'DL NO',
+                        'PURBA BARDHAMAN', 'BARDHAMAN', 'BURDWAN', 'WEST BENGAL', 'PIN:', 'PIN -'
+                    )):
+                        continue
+                    # Ignore report title tokens
+                    if any(s_upper == t or s_upper.startswith(t + ' ') or s_upper.endswith(' ' + t) for t in (
+                        'SALES REPORT', 'SALE REPORT', 'SALES SUMMARY', 'SALE SUMMARY', 'PRODUCT WISE',
+                        'CUSTOMER WISE', 'PARTY WISE', 'ITEM WISE', 'STATEMENT', 'LEDGER', 'SUMMARY',
+                        'REGISTER', 'OUR SOFTWARE MARG', 'MARG ERP', 'PAGE NO', 'PAGE', 'DETAIL',
+                        'PARTY/PRODUCT WISE', 'PARTY/PRODUCT', 'PURCHASE REPORT', 'STOCK REPORT'
+                    )):
+                        continue
+
+                    # If this cell matches any known customer in out['customers'], immediate exact match!
+                    ck = customer_canonical_key(s)
+                    if ck in known_cust_keys:
+                        banner_party = known_cust_keys[ck]
+                        break
+
+                    candidate_strings.append(s)
+                if banner_party:
+                    break
+
+            if not banner_party and candidate_strings:
+                banner_party = candidate_strings[0]
+
+        # Fallback to sheet_name or filename if still not found
+        if not cust_name_col and not banner_party:
+            for source_str in (sheet_name, filename):
+                if not source_str:
+                    continue
+                clean_src = re.sub(r'\.(xlsx|xls|csv)$', '', source_str, flags=re.IGNORECASE).strip()
+                clean_src = re.sub(r'^(?:sales_|ledger_|party_|customer_|report_)+', '', clean_src, flags=re.IGNORECASE).strip()
+                if clean_src and len(clean_src) >= 3 and clean_src.upper() not in (
+                    'SHEET1', 'SHEET', 'SALES', 'REPORT', 'SUMMARY', 'LEDGER', 'DATA', 'PAGE1'
+                ):
+                    ck = customer_canonical_key(clean_src)
+                    known_cust_keys = {
+                        customer_canonical_key(c['customer_name']): c['customer_name']
+                        for c in out.get('customers', [])
+                        if c.get('customer_name')
+                    }
+                    if ck in known_cust_keys:
+                        banner_party = known_cust_keys[ck]
+                        break
+                    if not banner_party:
+                        banner_party = clean_src
+
         # Check if sheet is a hierarchical Party/Product report (e.g. Party/Product Wise Net Sales)
         # where Column 0 contains Party Name headers, followed by product rows, terminated by Party Total.
         is_hierarchical_party_report = not cust_name_col and (
@@ -1191,6 +1270,7 @@ class MargExcelParser:
         if is_hierarchical_party_report:
             h_name_col = df.columns[0]
             h_qty_col = None
+            h_free_col = None
             h_rate_col = None
             h_amt_col = None
             for c in df.columns[1:]:
@@ -1198,6 +1278,9 @@ class MargExcelParser:
                 if c_norm in ('saleqty', 'quantity', 'qty', 'qtysold', 'soldqty', 'billedqty', 'netqty'):
                     if not h_qty_col:
                         h_qty_col = c
+                elif c_norm in ('free', 'freeqty', 'freequantity'):
+                    if not h_free_col:
+                        h_free_col = c
                 elif c_norm in ('avrate', 'rate', 'cost', 'unitcost'):
                     h_rate_col = c
                 elif c_norm in ('netamount', 'amount', 'billamount', 'val', 'value'):
@@ -1224,16 +1307,17 @@ class MargExcelParser:
                     continue
 
                 qty = _parse_float(row.get(h_qty_col), 0.0) if h_qty_col else 0.0
+                free = _parse_float(row.get(h_free_col), 0.0) if h_free_col else 0.0
                 rate = _parse_float(row.get(h_rate_col), 0.0) if h_rate_col else 0.0
                 amt = _parse_float(row.get(h_amt_col), 0.0) if h_amt_col else (qty * rate)
 
-                # If no quantity, this is a Party Name header
-                if qty <= 0 and amt <= 0:
+                # If no quantity or amount, this is a Party Name header
+                if qty <= 0 and free <= 0 and amt <= 0:
                     current_party = normalize_customer_name(val0)
                     continue
 
                 # If we have a quantity, this is a product line under current_party
-                if current_party and (qty > 0 or amt > 0):
+                if current_party and (qty > 0 or free > 0 or amt > 0):
                     c_name = current_party
                     c_code = generate_customer_code(c_name)
                     code = _make_stable_code(val0)
@@ -1243,6 +1327,7 @@ class MargExcelParser:
                         'product_name': val0,
                         'sale_date': end_date,
                         'qty_sold': round(qty, 4),
+                        'free_qty': round(free, 4),
                         'channel': 'retail',
                         'customer_code': c_code,
                         'customer_name': c_name,
@@ -1278,7 +1363,7 @@ class MargExcelParser:
             free = _parse_float(row.get(free_col), 0.0) if free_col else 0.0
             total_sold = qty + free
             rate = _parse_float(row.get(rate_col), 0.0) if rate_col else 0.0
-            amt  = _parse_float(row.get(amt_col), 0.0) if amt_col else (total_sold * rate)
+            amt  = _parse_float(row.get(amt_col), 0.0) if amt_col else (qty * rate if qty > 0 else total_sold * rate)
 
             raw_c_name = row.get(cust_name_col) if cust_name_col else banner_party
             c_name = normalize_customer_name(raw_c_name) if raw_c_name else None
@@ -1295,17 +1380,17 @@ class MargExcelParser:
 
             # Product sale line from sales report or party-wise individual ledger
             if total_sold > 0 or amt > 0:
-                effective_qty = total_sold if total_sold > 0 else 1.0
                 out['sales_history'].append({
                     'product_code': code,
                     'product_name': name,       # saved from ITEM DESCRIPTION / Particulars
                     'sale_date': row_date,      # transaction date
-                    'qty_sold': round(effective_qty, 4),
+                    'qty_sold': round(qty, 4),
+                    'free_qty': round(free, 4),
                     'channel': 'retail',
                     'customer_code': c_code,
                     'customer_name': c_name,
                     'invoice_no': inv_no or f"TXN-{code}-{len(out['sales_history'])+1}",
-                    'rate': rate if rate > 0 else round(amt / effective_qty, 2) if effective_qty > 0 else 0.0,
+                    'rate': rate if rate > 0 else round(amt / qty, 2) if qty > 0 else 0.0,
                     'amount': round(amt, 2),
                 })
 
@@ -1873,6 +1958,7 @@ class MargExcelParser:
                     'product_name': name or code,
                     'sale_date': sale_dt,
                     'qty_sold': qty,
+                    'free_qty': _parse_float(row.get('free_qty') or row.get('free'), 0.0),
                     'channel': _clean_str(row.get('channel')) or 'retail',
                     'customer_code': c_code,
                     'customer_name': c_name,

@@ -162,6 +162,7 @@ class SalesIntelligenceService:
         if c_key:
             matching_codes.add(f"CUST-{c_key[:40]}")
             matching_codes.add(f"CUST-{c_key[:25]}")
+            matching_codes.add(f"CUST-{c_key}")
 
         sales_records = self.db.scalars(
             select(SalesHistory)
@@ -177,7 +178,8 @@ class SalesIntelligenceService:
             all_sales = self.db.scalars(select(SalesHistory)).all()
             for s in all_sales:
                 s_name = s.customer_name or ''
-                if customer_canonical_key(s_name) == c_key:
+                s_code = (s.customer_code or '').replace('CUST-', '')
+                if customer_canonical_key(s_name) == c_key or customer_canonical_key(s_code) == c_key:
                     sales_records.append(s)
 
         return sales_records
@@ -239,13 +241,17 @@ class SalesIntelligenceService:
             inv_ref = s.invoice_no or f"INV-{s.id}"
             invoices_set.add(inv_ref)
 
+            free_val = getattr(s, 'free_qty', 0.0) or 0.0
+
             recent_orders.append({
                 'invoice_no': inv_ref,
                 'date': s.sale_date.strftime('%d-%b-%Y') if s.sale_date else 'N/A',
                 'product_code': s.product_code,
                 'product_name': s.product_name or s.product_code,
+                'description': s.product_name or s.product_code,
                 'batch_no': s.batch_no or 'DEFAULT',
                 'qty': s.qty_sold,
+                'free': free_val,
                 'rate': s.rate or 0.0,
                 'amount': round(amt, 2),
             })
@@ -258,9 +264,11 @@ class SalesIntelligenceService:
                 prod_agg[p_code] = {
                     'product_code': p_code,
                     'product_name': p_name,
+                    'description': p_name,
                     'company': getattr(p_cat_obj, 'company', None) or getattr(s, 'channel', None) or 'General',
                     'category': getattr(p_cat_obj, 'category', None) or 'Tablets',
                     'total_qty': 0.0,
+                    'total_free': 0.0,
                     'total_amount': 0.0,
                     'order_count': 0,
                     'rates': [],
@@ -270,7 +278,9 @@ class SalesIntelligenceService:
             entry = prod_agg[p_code]
             if p_name and (not entry['product_name'] or entry['product_name'] == p_code):
                 entry['product_name'] = p_name
+                entry['description'] = p_name
             entry['total_qty'] += s.qty_sold
+            entry['total_free'] += free_val
             entry['total_amount'] += amt
             entry['order_count'] += 1
             if s.rate and s.rate > 0:
@@ -289,15 +299,27 @@ class SalesIntelligenceService:
             transacted_products.append({
                 'product_code': p_info['product_code'],
                 'product_name': p_info['product_name'],
+                'description': p_info['description'],
                 'company': p_info['company'],
                 'category': p_info['category'],
+                'qty': round(p_info['total_qty'], 2),
                 'total_qty': round(p_info['total_qty'], 2),
-                'total_amount': round(p_info['total_amount'], 2),
+                'free': round(p_info['total_free'], 2),
+                'total_free': round(p_info['total_free'], 2),
+                'rate': avg_rate,
                 'avg_rate': avg_rate,
+                'amount': round(p_info['total_amount'], 2),
+                'total_amount': round(p_info['total_amount'], 2),
                 'order_count': p_info['order_count'],
                 'last_purchase_date': p_info['last_purchase_date_str'],
             })
         transacted_products.sort(key=lambda x: x['total_amount'], reverse=True)
+
+        product_totals = {
+            'total_qty': round(sum(p['qty'] for p in transacted_products), 2),
+            'total_free': round(sum(p['free'] for p in transacted_products), 2),
+            'total_amount': round(sum(p['amount'] for p in transacted_products), 2),
+        }
 
         total_orders = len(invoices_set) if invoices_set else len(sales_records)
         days_since_last_order = (now - last_order_dt).days if last_order_dt else None
@@ -385,6 +407,7 @@ class SalesIntelligenceService:
             'days_since_last_order': days_since_last_order if days_since_last_order is not None else 'N/A',
             'ageing': {k: round(v, 2) for k, v in ageing.items()},
             'pending_invoices': pending_invoices,
+            'product_totals': product_totals,
             'transacted_products': transacted_products,
             'recent_orders': recent_orders[:500],
         }

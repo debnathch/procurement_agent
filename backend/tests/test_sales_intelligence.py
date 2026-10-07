@@ -908,5 +908,161 @@ def test_purchase_history_transacted_products_from_product_wise_ledger():
     session.close()
 
 
+def test_product_wise_customer_ledger_exact_user_scenario():
+    """
+    Validates the exact scenario requested by the user:
+    - Master Customer Ledger has: 'A.B.MEDICINE CENTRE           KATWA'
+      with Debit (Customer Dues) = 15420.50 and Credit (Company Liability) = 350.00
+    - Product-Wise Customer Ledger has pre-header banner: 'A.B.MEDICINE CENTRE-KATWA'
+      with table columns: 'D E S C R I P T I O N', 'QTY.', 'FREE', 'RATE', 'AMOUNT'
+      and bottom row: 'Total'
+    - Normalization maps both to the exact same Customer record (CUST-ABMEDICINECENTREKATWA).
+    - Customer Dues (Debit) and Company Liability (Credit) are preserved.
+    - Purchase history transacted products table contains description, qty, free, rate, amount and exact totals.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # 1. Ingest Master Customer Ledger
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'A.B.MEDICINE CENTRE           KATWA',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 15420.50,
+            'Credit': 350.00,
+        }
+    ])
+    buf_m = io.BytesIO()
+    master_df.to_excel(buf_m, index=False)
+    ingest_svc.ingest_excel(buf_m.getvalue(), filename='CUSTOMER_MASTER_LEDGER.XLS')
+
+    # 2. Ingest Product-Wise Customer Ledger matching MARG export layout
+    # Row 0: Company name
+    # Row 1: Company address
+    # Row 2: Customer Name (A.B.MEDICINE CENTRE-KATWA)
+    # Row 3: Date range
+    # Row 4: Header row
+    # Row 5+: Data rows
+    # Last Row: Total row
+    raw_excel_rows = [
+        ['BEN REMEDIES', None, None, None, None],
+        ['NETAJI SUBHAS ROAD, PURBA BARDHAMAN', None, None, None, None],
+        ['A.B.MEDICINE CENTRE-KATWA', None, None, None, None],
+        ['From 01/04/2026 to 03/10/2026', None, None, None, None],
+        ['D E S C R I P T I O N', 'QTY.', 'FREE', 'RATE', 'AMOUNT'],
+        ['CEFTAZ 1 GM INJ.', 100.0, 10.0, 250.0, 25000.0],
+        ['AMIKACIN 500 MG INJ.', 200.0, 0.0, 65.0, 13000.0],
+        ['Total', 300.0, 10.0, None, 38000.0],
+    ]
+    df_product_ledger = pd.DataFrame(raw_excel_rows)
+    buf_p = io.BytesIO()
+    df_product_ledger.to_excel(buf_p, header=False, index=False)
+    ingest_svc.ingest_excel(buf_p.getvalue(), filename='PRODUCT_WISE_CUSTOMER_LEDGER.XLS')
+
+    # 3. Verify single customer created and resolved
+    custs = session.query(Customer).all()
+    assert len(custs) == 1, f"Expected exactly 1 customer, found {len(custs)}: {[c.customer_name for c in custs]}"
+    cust = custs[0]
+    assert cust.customer_code == 'CUST-ABMEDICINECENTREKATWA'
+
+    # 4. Verify Customer Summary
+    summary = sales_svc.get_customer_summary(cust.customer_code)
+
+    # Financial Dues & Liabilities
+    assert summary['current_dues'] == 15420.50
+    assert summary['company_payable'] == 350.00
+    assert summary['net_receivable'] == 15420.50 - 350.00
+
+    # Purchase History Transacted Products
+    assert 'transacted_products' in summary
+    t_prods = summary['transacted_products']
+    assert len(t_prods) == 2, f"Expected 2 products, got: {t_prods}"
+
+    prod_map = {p['description']: p for p in t_prods}
+    assert 'CEFTAZ 1 GM INJ.' in prod_map
+    assert 'AMIKACIN 500 MG INJ.' in prod_map
+
+    ceftaz = prod_map['CEFTAZ 1 GM INJ.']
+    assert ceftaz['qty'] == 100.0
+    assert ceftaz['free'] == 10.0
+    assert ceftaz['rate'] == 250.0
+    assert ceftaz['amount'] == 25000.0
+
+    amikacin = prod_map['AMIKACIN 500 MG INJ.']
+    assert amikacin['qty'] == 200.0
+    assert amikacin['free'] == 0.0
+    assert amikacin['rate'] == 65.0
+    assert amikacin['amount'] == 13000.0
+
+    # Summary Totals
+    assert 'product_totals' in summary
+    totals = summary['product_totals']
+    assert totals['total_qty'] == 300.0
+    assert totals['total_free'] == 10.0
+    assert totals['total_amount'] == 38000.0
+
+    # Verify 'Total' footer was not inserted as a product
+    all_sh = session.query(SalesHistory).all()
+    assert not any('TOTAL' in s.product_name.upper() for s in all_sh)
+
+    session.close()
 
 
+def test_product_wise_customer_ledger_reverse_order_ingestion():
+    """
+    Validates that uploading Product-Wise Customer Ledger FIRST and Master Customer Ledger SECOND
+    also successfully unifies the customer and preserves both financial dues and purchase history.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # 1. Ingest Product-Wise Customer Ledger FIRST
+    raw_excel_rows = [
+        ['BEN REMEDIES', None, None, None, None],
+        ['NETAJI SUBHAS ROAD, PURBA BARDHAMAN', None, None, None, None],
+        ['A.B.MEDICINE CENTRE-KATWA', None, None, None, None],
+        ['From 01/04/2026 to 03/10/2026', None, None, None, None],
+        ['D E S C R I P T I O N', 'QTY.', 'FREE', 'RATE', 'AMOUNT'],
+        ['CEFTAZ 1 GM INJ.', 50.0, 5.0, 250.0, 12500.0],
+    ]
+    df_product_ledger = pd.DataFrame(raw_excel_rows)
+    buf_p = io.BytesIO()
+    df_product_ledger.to_excel(buf_p, header=False, index=False)
+    ingest_svc.ingest_excel(buf_p.getvalue(), filename='PRODUCT_WISE_CUSTOMER_LEDGER.XLS')
+
+    # 2. Ingest Master Customer Ledger SECOND
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'A.B.MEDICINE CENTRE           KATWA',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 8200.00,
+            'Credit': 150.00,
+        }
+    ])
+    buf_m = io.BytesIO()
+    master_df.to_excel(buf_m, index=False)
+    ingest_svc.ingest_excel(buf_m.getvalue(), filename='CUSTOMER_MASTER_LEDGER.XLS')
+
+    # 3. Verify unified customer
+    custs = session.query(Customer).all()
+    assert len(custs) == 1
+    cust = custs[0]
+    assert cust.customer_code == 'CUST-ABMEDICINECENTREKATWA'
+
+    summary = sales_svc.get_customer_summary(cust.customer_code)
+    assert summary['current_dues'] == 8200.00
+    assert summary['company_payable'] == 150.00
+    assert len(summary['transacted_products']) == 1
+    assert summary['transacted_products'][0]['qty'] == 50.0
+    assert summary['transacted_products'][0]['free'] == 5.0
+    assert summary['transacted_products'][0]['amount'] == 12500.0
+
+    session.close()

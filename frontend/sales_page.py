@@ -417,7 +417,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     with tab_expiry:
         st.subheader("⚠️ Near-Expiry Opportunities")
         st.markdown("""
-        Products this customer **historically purchases** that currently have warehouse batches expiring within **90 days**.
+        Products this customer **historically purchases** that currently have warehouse batches expiring within **180 days**.
         Push suitable stock with complete confidence and clear rationales.
         """)
 
@@ -503,14 +503,16 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
         transacted_products = summary.get('transacted_products', [])
         recent_orders = summary.get('recent_orders', [])
+        product_totals = summary.get('product_totals', {})
 
         # Fallback aggregation in case frontend received raw recent_orders without transacted_products
         if not transacted_products and recent_orders:
             p_map = {}
             for r in recent_orders:
                 p_code = r.get('product_code', 'UNKNOWN')
-                p_name = r.get('product_name', p_code)
+                p_name = r.get('product_name') or r.get('description', p_code)
                 qty = float(r.get('qty', 0.0) or 0.0)
+                free = float(r.get('free', 0.0) or 0.0)
                 amt = float(r.get('amount', 0.0) or 0.0)
                 rate = float(r.get('rate', 0.0) or 0.0)
                 dt = r.get('date', 'N/A')
@@ -518,9 +520,11 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                     p_map[p_code] = {
                         'product_code': p_code,
                         'product_name': p_name,
+                        'description': p_name,
                         'company': 'General',
                         'category': 'Tablets',
                         'total_qty': 0.0,
+                        'total_free': 0.0,
                         'total_amount': 0.0,
                         'order_count': 0,
                         'rates': [],
@@ -528,6 +532,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                     }
                 entry = p_map[p_code]
                 entry['total_qty'] += qty
+                entry['total_free'] += free
                 entry['total_amount'] += amt
                 entry['order_count'] += 1
                 if rate > 0:
@@ -543,11 +548,17 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                 transacted_products.append({
                     'product_code': p_info['product_code'],
                     'product_name': p_info['product_name'],
+                    'description': p_info['description'],
                     'company': p_info['company'],
                     'category': p_info['category'],
+                    'qty': round(p_info['total_qty'], 2),
                     'total_qty': round(p_info['total_qty'], 2),
-                    'total_amount': round(p_info['total_amount'], 2),
+                    'free': round(p_info['total_free'], 2),
+                    'total_free': round(p_info['total_free'], 2),
+                    'rate': avg_r,
                     'avg_rate': avg_r,
+                    'amount': round(p_info['total_amount'], 2),
+                    'total_amount': round(p_info['total_amount'], 2),
                     'order_count': p_info['order_count'],
                     'last_purchase_date': p_info['last_purchase_date'],
                 })
@@ -560,32 +571,34 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                 "will appear here once the **Product-Wise Customer Ledger** (.xlsx/.xls) is ingested using Uploader 2 above."
             )
         else:
+            tot_units = product_totals.get('total_qty', sum(float(p.get('qty', p.get('total_qty', 0.0)) or 0.0) for p in transacted_products))
+            tot_free = product_totals.get('total_free', sum(float(p.get('free', p.get('total_free', 0.0)) or 0.0) for p in transacted_products))
+            tot_val = product_totals.get('total_amount', sum(float(p.get('amount', p.get('total_amount', 0.0)) or 0.0) for p in transacted_products))
+
             col_hp1, col_hp2, col_hp3, col_hp4 = st.columns(4)
             with col_hp1:
-                st.metric("Unique Products Transacted", len(transacted_products))
+                st.metric("Unique Products", len(transacted_products))
             with col_hp2:
-                tot_units = sum(p.get('total_qty', 0.0) for p in transacted_products)
-                st.metric("Total Units Transacted", f"{tot_units:,.1f}")
+                st.metric("Total QTY.", f"{tot_units:,.2f}")
             with col_hp3:
-                tot_val = sum(p.get('total_amount', 0.0) for p in transacted_products)
-                st.metric("Total Transacted Value", f"₹{tot_val:,.2f}")
+                st.metric("Total FREE", f"{tot_free:,.2f}")
             with col_hp4:
-                st.metric("Total Invoices / Orders", total_orders)
+                st.metric("Total AMOUNT", f"₹{tot_val:,.2f}")
 
             st.markdown("---")
 
             sub_tab_products, sub_tab_txns = st.tabs([
-                f"📦 Transacted Products List ({len(transacted_products)} Products)",
-                f"🧾 Detailed Invoices & Transactions ({len(recent_orders)} Records)"
+                f"📦 Product-Wise Ledger Table ({len(transacted_products)} Products)",
+                f"🧾 Line-by-Line Sales Vouchers ({len(recent_orders)} Records)"
             ])
 
             with sub_tab_products:
                 st.markdown(
-                    "**Customer Product Portfolio**: All products transacted by this customer from the **Product-Wise Customer Ledger**."
+                    "**Product-Wise Customer Ledger Table** as extracted from the uploaded Excel:"
                 )
                 search_query = st.text_input(
-                    "🔍 Filter Transacted Products:",
-                    placeholder="Search by product name or item code...",
+                    "🔍 Filter Products:",
+                    placeholder="Search by product description / name...",
                     key=f"search_prods_{selected_code}"
                 )
 
@@ -594,62 +607,114 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                     sq = search_query.strip().lower()
                     filtered_prods = [
                         p for p in transacted_products
-                        if sq in str(p.get('product_name', '')).lower() or sq in str(p.get('product_code', '')).lower()
+                        if sq in str(p.get('description', p.get('product_name', ''))).lower()
+                        or sq in str(p.get('product_code', '')).lower()
                     ]
 
                 if not filtered_prods:
-                    st.warning(f"No transacted products found matching '{search_query}'.")
+                    st.warning(f"No products found matching '{search_query}'.")
                 else:
-                    df_prods = pd.DataFrame(filtered_prods)
-                    cols_to_use = [
-                        c for c in ['product_name', 'product_code', 'company', 'total_qty', 'avg_rate', 'total_amount', 'order_count', 'last_purchase_date']
-                        if c in df_prods.columns
-                    ]
-                    df_display_prods = df_prods[cols_to_use].copy()
-                    df_display_prods.rename(columns={
-                        'product_name': 'Product Name',
-                        'product_code': 'Item Code',
-                        'company': 'Company / Brand',
-                        'total_qty': 'Total Qty Transacted',
-                        'avg_rate': 'Avg Rate (₹)',
-                        'total_amount': 'Total Value (₹)',
-                        'order_count': 'Order Frequency',
-                        'last_purchase_date': 'Last Purchased',
-                    }, inplace=True)
+                    table_rows = []
+                    sub_sum_qty = 0.0
+                    sub_sum_free = 0.0
+                    sub_sum_amt = 0.0
 
-                    st.dataframe(df_display_prods, use_container_width=True, hide_index=True)
+                    for p in filtered_prods:
+                        desc_val = str(p.get('description') or p.get('product_name') or '').strip()
+                        q_val = float(p.get('qty', p.get('total_qty', 0.0)) or 0.0)
+                        f_val = float(p.get('free', p.get('total_free', 0.0)) or 0.0)
+                        r_val = float(p.get('rate', p.get('avg_rate', 0.0)) or 0.0)
+                        a_val = float(p.get('amount', p.get('total_amount', 0.0)) or 0.0)
 
-                    csv_prods = df_display_prods.to_csv(index=False).encode('utf-8')
+                        sub_sum_qty += q_val
+                        sub_sum_free += f_val
+                        sub_sum_amt += a_val
+
+                        table_rows.append({
+                            'D E S C R I P T I O N': desc_val,
+                            'QTY.': f"{q_val:,.2f}",
+                            'FREE': f"{f_val:,.2f}",
+                            'RATE': f"{r_val:,.2f}",
+                            'AMOUNT': f"{a_val:,.2f}",
+                        })
+
+                    # Total row just like the uploaded Excel
+                    table_rows.append({
+                        'D E S C R I P T I O N': 'Total',
+                        'QTY.': f"{sub_sum_qty:,.2f}",
+                        'FREE': f"{sub_sum_free:,.2f}",
+                        'RATE': '—',
+                        'AMOUNT': f"{sub_sum_amt:,.2f}",
+                    })
+
+                    df_purchase_display = pd.DataFrame(table_rows)
+                    st.dataframe(df_purchase_display, use_container_width=True, hide_index=True)
+
+                    st.markdown(f"""
+                    <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 6px; padding: 10px 16px; margin-top: 6px; margin-bottom: 12px; display: flex; justify-content: space-between; font-weight: 700; font-size: 0.95rem; color: #1E293B;">
+                        <span>📊 Column Totals:</span>
+                        <span>QTY.: {sub_sum_qty:,.2f}</span>
+                        <span>FREE: {sub_sum_free:,.2f}</span>
+                        <span>AMOUNT: ₹{sub_sum_amt:,.2f}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    csv_prods = df_purchase_display.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label=f"📥 Download Transacted Products CSV ({cust_name})",
+                        label=f"📥 Download Product-Wise Ledger CSV ({cust_name})",
                         data=csv_prods,
-                        file_name=f"{selected_code}_transacted_products.csv",
+                        file_name=f"{selected_code}_product_wise_ledger.csv",
                         mime="text/csv",
                         key=f"btn_dl_prods_{selected_code}"
                     )
 
             with sub_tab_txns:
-                st.markdown("**Detailed Sales Transaction Log**: Line-by-line sales orders and invoice entries.")
+                st.markdown("**Line-by-Line Sales Transactions**: Detailed vouchers and invoices.")
                 if not recent_orders:
                     st.info("No detailed transaction rows available.")
                 else:
-                    df_orders = pd.DataFrame(recent_orders)
-                    rename_cols = {
-                        'invoice_no': 'Invoice / Voucher No',
-                        'date': 'Invoice Date',
-                        'product_name': 'Product Name',
-                        'product_code': 'Item Code',
-                        'batch_no': 'Batch',
-                        'qty': 'Quantity Sold',
-                        'rate': 'Rate (₹)',
-                        'amount': 'Net Amount (₹)',
-                    }
-                    avail_cols = [c for c in ['invoice_no', 'date', 'product_name', 'product_code', 'batch_no', 'qty', 'rate', 'amount'] if c in df_orders.columns]
-                    df_display_orders = df_orders[avail_cols].copy()
-                    df_display_orders.rename(columns=rename_cols, inplace=True)
-                    st.dataframe(df_display_orders, use_container_width=True, hide_index=True)
+                    txn_rows = []
+                    t_sum_qty = 0.0
+                    t_sum_free = 0.0
+                    t_sum_amt = 0.0
 
-                    csv_txns = df_display_orders.to_csv(index=False).encode('utf-8')
+                    for r in recent_orders:
+                        inv_val = str(r.get('invoice_no') or 'N/A')
+                        dt_val = str(r.get('date') or 'N/A')
+                        d_val = str(r.get('description') or r.get('product_name') or '').strip()
+                        q_val = float(r.get('qty', 0.0) or 0.0)
+                        f_val = float(r.get('free', 0.0) or 0.0)
+                        r_val = float(r.get('rate', 0.0) or 0.0)
+                        a_val = float(r.get('amount', 0.0) or 0.0)
+
+                        t_sum_qty += q_val
+                        t_sum_free += f_val
+                        t_sum_amt += a_val
+
+                        txn_rows.append({
+                            'Invoice / Voucher': inv_val,
+                            'Date': dt_val,
+                            'D E S C R I P T I O N': d_val,
+                            'QTY.': f"{q_val:,.2f}",
+                            'FREE': f"{f_val:,.2f}",
+                            'RATE': f"{r_val:,.2f}",
+                            'AMOUNT': f"{a_val:,.2f}",
+                        })
+
+                    txn_rows.append({
+                        'Invoice / Voucher': 'Total',
+                        'Date': '—',
+                        'D E S C R I P T I O N': 'Total',
+                        'QTY.': f"{t_sum_qty:,.2f}",
+                        'FREE': f"{t_sum_free:,.2f}",
+                        'RATE': '—',
+                        'AMOUNT': f"{t_sum_amt:,.2f}",
+                    })
+
+                    df_txns_display = pd.DataFrame(txn_rows)
+                    st.dataframe(df_txns_display, use_container_width=True, hide_index=True)
+
+                    csv_txns = df_txns_display.to_csv(index=False).encode('utf-8')
                     st.download_button(
                         label=f"📥 Download Invoices & Transactions CSV ({cust_name})",
                         data=csv_txns,

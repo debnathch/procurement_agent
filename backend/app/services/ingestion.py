@@ -568,6 +568,7 @@ class IngestionService:
             s_rec = dict(s_data)
             s_rec['product_code'] = resolved_code
             s_rec['product_name'] = raw_name
+            s_rec['free_qty'] = float(s_data.get('free_qty') or 0.0)
 
             # Resolve customer code and customer name against customer master
             raw_c_name = s_data.get('customer_name', '')
