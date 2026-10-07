@@ -209,7 +209,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                 col_s4.metric("Sales Rows Imported", stats.get('sales_inserted', 0))
                 st.info("👉 Switch to the **'Review & Correct Suggestions'** tab to review, adjust, and approve order suggestions!")
                 if st.button("👉 Go to Review & Correct Suggestions", type="primary", key="nav_to_proposals_btn"):
-                    st.session_state.pop("main_active_tab", None)
                     st.query_params["tab"] = "proposals"
                     st.rerun()
     
@@ -300,7 +299,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
         col_ref, col_comp, col_mfr, col_filt, col_risk = st.columns([1, 2, 2, 1.5, 2])
         with col_ref:
             if st.button("🔄 Refresh Data", key="refresh_proposals_btn"):
-                st.session_state.pop("main_active_tab", None)
                 st.query_params["tab"] = "proposals"
                 st.rerun()
     
@@ -399,7 +397,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
         with col_clear_search:
             if st.button("🔄 Reset Search", use_container_width=True, key="proposal_reset_search_btn"):
                 search_kw = ""
-                st.session_state.pop("main_active_tab", None)
                 st.query_params["tab"] = "proposals"
                 st.rerun()
     
@@ -429,7 +426,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                         r_res = requests.post(f"{BACKEND_URL}/runs", json={"lead_time_days": int(config_lead_time)}, timeout=30)
                         if r_res.status_code == 201:
                             st.success("Procurement Run finished!")
-                            st.session_state.pop("main_active_tab", None)
                             st.query_params["tab"] = "proposals"
                             st.rerun()
                         else:
@@ -626,7 +622,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                                         )
                                         if decide_res.status_code == 200:
                                             st.toast(f"✅ Proposal for {p['product_name']} successfully approved!", icon="🎉")
-                                            st.session_state["main_active_tab"] = SLUG_TO_LABEL.get("proposals", TAB_LABELS[1])
                                             st.query_params["tab"] = "proposals"
                                             time.sleep(0.3)
                                             st.rerun()
@@ -657,7 +652,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                                         )
                                         if decide_res.status_code == 200:
                                             st.toast(f"Proposal {p_id} rejected.", icon="🗑️")
-                                            st.session_state["main_active_tab"] = SLUG_TO_LABEL.get("proposals", TAB_LABELS[1])
                                             st.query_params["tab"] = "proposals"
                                             time.sleep(0.3)
                                             st.rerun()
@@ -927,7 +921,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
         with col_s3:
             if st.button("🔄 Show All Products", use_container_width=True, key="btn_clear_search_no_reorder"):
                 search_kw = ""
-                st.session_state.pop("main_active_tab", None)
                 st.query_params["tab"] = "no_reorder"
                 st.rerun()
     
