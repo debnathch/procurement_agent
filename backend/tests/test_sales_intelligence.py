@@ -1163,3 +1163,85 @@ def test_hierarchical_party_item_wise_sales_summary_multi_customer():
 
     session.close()
 
+
+def test_sales_dashboard_overview_and_revenue_bins():
+    """
+    Validates get_sales_dashboard_overview:
+    - Total number of customers
+    - Total sales
+    - Categorization into revenue bins:
+      [0 to 2 Lakh, >2 to 5 Lakh, >5 to 8 Lakh, >8 to 12 Lakh, >12 to 20 Lakh, >20 Lakh]
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # Create 6 customers in different revenue brackets
+    customers_data = [
+        ('CUST-1', 'MEDICINE SHOP 1', 'General', 50000.0),       # 0 to 2L
+        ('CUST-2', 'MEDICINE SHOP 2', 'General', 300000.0),      # >2 to 5L
+        ('CUST-3', 'MEDICINE SHOP 3', 'General', 650000.0),      # >5 to 8L
+        ('CUST-4', 'MEDICINE SHOP 4', 'General', 1000000.0),     # >8 to 12L
+        ('CUST-5', 'MEDICINE SHOP 5', 'General', 1500000.0),     # >12 to 20L
+        ('CUST-6', 'MEDICINE SHOP 6', 'General', 3500000.0),     # >20L
+    ]
+
+    for code, name, grp, sales_amt in customers_data:
+        c = Customer(
+            customer_code=code,
+            customer_name=name,
+            group_name=grp,
+            district='Purba Bardhaman',
+            status='ACTIVE'
+        )
+        session.add(c)
+        # Add sales history row
+        sh = SalesHistory(
+            product_code='MED-001',
+            product_name='AZITHROMYCIN 500',
+            sale_date=datetime.utcnow(),
+            qty_sold=10.0,
+            rate=sales_amt / 10.0,
+            amount=sales_amt,
+            customer_code=code,
+            customer_name=name
+        )
+        session.add(sh)
+
+    session.commit()
+
+    sales_svc = SalesIntelligenceService(session)
+    overview = sales_svc.get_sales_dashboard_overview()
+
+    assert overview['total_customers'] == 6
+    assert overview['active_customers'] == 6
+    assert overview['total_sales'] == 50000.0 + 300000.0 + 650000.0 + 1000000.0 + 1500000.0 + 3500000.0
+
+    bins = {b['bin_label']: b for b in overview['customer_sales_bins']}
+    assert '0 to 2 Lakh' in bins
+    assert bins['0 to 2 Lakh']['customer_count'] == 1
+    assert bins['0 to 2 Lakh']['total_sales'] == 50000.0
+
+    assert '>2 to 5 Lakh' in bins
+    assert bins['>2 to 5 Lakh']['customer_count'] == 1
+    assert bins['>2 to 5 Lakh']['total_sales'] == 300000.0
+
+    assert '>5 to 8 Lakh' in bins
+    assert bins['>5 to 8 Lakh']['customer_count'] == 1
+    assert bins['>5 to 8 Lakh']['total_sales'] == 650000.0
+
+    assert '>8 to 12 Lakh' in bins
+    assert bins['>8 to 12 Lakh']['customer_count'] == 1
+    assert bins['>8 to 12 Lakh']['total_sales'] == 1000000.0
+
+    assert '>12 to 20 Lakh' in bins
+    assert bins['>12 to 20 Lakh']['customer_count'] == 1
+    assert bins['>12 to 20 Lakh']['total_sales'] == 1500000.0
+
+    assert '>20 Lakh' in bins
+    assert bins['>20 Lakh']['customer_count'] == 1
+    assert bins['>20 Lakh']['total_sales'] == 3500000.0
+
+    session.close()
+
+

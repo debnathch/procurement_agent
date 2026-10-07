@@ -146,7 +146,83 @@ class SalesIntelligenceService:
             })
         return sorted(results, key=lambda x: x['customer_name'].upper())
 
+    def get_sales_dashboard_overview(self) -> dict[str, Any]:
+        """
+        Computes executive sales dashboard overview KPIs and customer category bins by sales volume:
+        - total_customers
+        - total_sales
+        - active_customers (customers with total_sales > 0)
+        - total_dues (Debit dues from Master Ledger)
+        - total_payable (Credit liabilities from Master Ledger)
+        - net_receivable
+        - total_orders
+        - customer_sales_bins:
+            - '0 to 2 Lakh': 0 <= sales <= 200,000
+            - '>2 to 5 Lakh': 200,000 < sales <= 500,000
+            - '>5 to 8 Lakh': 500,000 < sales <= 800,000
+            - '>8 to 12 Lakh': 800,000 < sales <= 1,200,000
+            - '>12 to 20 Lakh': 1,200,000 < sales <= 2,000,000
+            - '>20 Lakh': sales > 2,000,000
+        """
+        custs = self.list_customers(limit=10000)
+        tot_customers = len(custs)
+        tot_sales = sum(c.get('total_sales', 0.0) for c in custs)
+        tot_dues = sum(c.get('current_dues', 0.0) for c in custs)
+        tot_payable = sum(c.get('company_payable', c.get('credit_amount', 0.0)) for c in custs)
+        tot_orders = sum(c.get('total_orders', 0) for c in custs)
+        active_customers = sum(1 for c in custs if c.get('total_sales', 0.0) > 0)
+
+        bin_specs = [
+            {'bin_id': '0_to_2L', 'bin_label': '0 to 2 Lakh', 'min_val': 0.0, 'max_val': 200000.0},
+            {'bin_id': '2_to_5L', 'bin_label': '>2 to 5 Lakh', 'min_val': 200000.0, 'max_val': 500000.0},
+            {'bin_id': '5_to_8L', 'bin_label': '>5 to 8 Lakh', 'min_val': 500000.0, 'max_val': 800000.0},
+            {'bin_id': '8_to_12L', 'bin_label': '>8 to 12 Lakh', 'min_val': 800000.0, 'max_val': 1200000.0},
+            {'bin_id': '12_to_20L', 'bin_label': '>12 to 20 Lakh', 'min_val': 1200000.0, 'max_val': 2000000.0},
+            {'bin_id': 'above_20L', 'bin_label': '>20 Lakh', 'min_val': 2000000.0, 'max_val': float('inf')},
+        ]
+
+        bins_result = []
+        for spec in bin_specs:
+            min_v = spec['min_val']
+            max_v = spec['max_val']
+            if max_v == float('inf'):
+                in_bin = [c for c in custs if c.get('total_sales', 0.0) > min_v]
+            elif min_v == 0.0:
+                in_bin = [c for c in custs if 0.0 <= c.get('total_sales', 0.0) <= max_v]
+            else:
+                in_bin = [c for c in custs if min_v < c.get('total_sales', 0.0) <= max_v]
+
+            cnt = len(in_bin)
+            bin_sales = sum(c.get('total_sales', 0.0) for c in in_bin)
+            c_pct = round((cnt / tot_customers * 100.0), 2) if tot_customers > 0 else 0.0
+            s_pct = round((bin_sales / tot_sales * 100.0), 2) if tot_sales > 0 else 0.0
+
+            bins_result.append({
+                'bin_id': spec['bin_id'],
+                'bin_label': spec['bin_label'],
+                'min_value': min_v,
+                'max_value': None if max_v == float('inf') else max_v,
+                'customer_count': cnt,
+                'customer_percentage': c_pct,
+                'total_sales': round(bin_sales, 2),
+                'sales_percentage': s_pct,
+                'customer_codes': [c['customer_code'] for c in in_bin],
+            })
+
+        return {
+            'total_customers': tot_customers,
+            'active_customers': active_customers,
+            'inactive_customers': tot_customers - active_customers,
+            'total_sales': round(tot_sales, 2),
+            'total_dues': round(tot_dues, 2),
+            'total_payable': round(tot_payable, 2),
+            'net_receivable': round(tot_dues - tot_payable, 2),
+            'total_orders': tot_orders,
+            'customer_sales_bins': bins_result,
+        }
+
     def _get_customer_sales(self, customer_code: str, cust_name: str) -> list[SalesHistory]:
+
         """
         Retrieves all sales records for a customer, matching by:
         - Customer Code

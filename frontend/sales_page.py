@@ -227,10 +227,156 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                         st.session_state["sales_upload_error"] = f"Error communicating with backend: {e}"
                         st.rerun()
 
-    # Section 2: Customer Selection
+    # Section 2: Executive Sales Dashboard & Customer Revenue Slabs (Bins)
     if not customers:
         st.info("ℹ️ No customer records found. Please expand the upload section above to upload a MARG Sales/Customer file or click 'Load Demo Customers & Dues'.")
         return
+
+    # Fetch or compute overview metrics
+    overview_data = None
+    if is_healthy:
+        try:
+            o_res = requests.get(f"{BACKEND_URL}/sales/overview-metrics", timeout=10)
+            if o_res.status_code == 200:
+                overview_data = o_res.json()
+        except Exception:
+            pass
+
+    if not overview_data:
+        tot_c = len(customers)
+        tot_s = sum(c.get('total_sales', 0.0) for c in customers)
+        tot_d = sum(c.get('current_dues', 0.0) for c in customers)
+        tot_p = sum(c.get('company_payable', c.get('credit_amount', 0.0)) for c in customers)
+        act_c = sum(1 for c in customers if c.get('total_sales', 0.0) > 0)
+
+        specs = [
+            ('0_to_2L', '0 to 2 Lakh', 0.0, 200000.0),
+            ('2_to_5L', '>2 to 5 Lakh', 200000.0, 500000.0),
+            ('5_to_8L', '>5 to 8 Lakh', 500000.0, 800000.0),
+            ('8_to_12L', '>8 to 12 Lakh', 800000.0, 1200000.0),
+            ('12_to_20L', '>12 to 20 Lakh', 1200000.0, 2000000.0),
+            ('above_20L', '>20 Lakh', 2000000.0, float('inf')),
+        ]
+        bins_list = []
+        for bid, blabel, bmin, bmax in specs:
+            if bmax == float('inf'):
+                in_b = [c for c in customers if c.get('total_sales', 0.0) > bmin]
+            elif bmin == 0.0:
+                in_b = [c for c in customers if 0.0 <= c.get('total_sales', 0.0) <= bmax]
+            else:
+                in_b = [c for c in customers if bmin < c.get('total_sales', 0.0) <= bmax]
+            b_cnt = len(in_b)
+            b_sales = sum(c.get('total_sales', 0.0) for c in in_b)
+            bins_list.append({
+                'bin_id': bid,
+                'bin_label': blabel,
+                'customer_count': b_cnt,
+                'customer_percentage': round((b_cnt / tot_c * 100.0), 2) if tot_c > 0 else 0.0,
+                'total_sales': round(b_sales, 2),
+                'sales_percentage': round((b_sales / tot_s * 100.0), 2) if tot_s > 0 else 0.0,
+                'customer_codes': [c['customer_code'] for c in in_b],
+            })
+        overview_data = {
+            'total_customers': tot_c,
+            'active_customers': act_c,
+            'inactive_customers': tot_c - act_c,
+            'total_sales': round(tot_s, 2),
+            'total_dues': round(tot_d, 2),
+            'total_payable': round(tot_p, 2),
+            'net_receivable': round(tot_d - tot_p, 2),
+            'total_orders': sum(c.get('total_orders', 0) for c in customers),
+            'customer_sales_bins': bins_list,
+        }
+
+    # Top Executive KPI Cards
+    st.markdown("### 📊 Sales Overview & Key Metrics")
+    col_k1, col_k2, col_k3, col_k4 = st.columns(4)
+    with col_k1:
+        st.metric(
+            "👥 Total Customers",
+            f"{overview_data['total_customers']:,}",
+            delta=f"{overview_data['active_customers']} Active Buyers",
+            help="Total registered parties across MARG Master Ledger & Product Sales Ledger."
+        )
+    with col_k2:
+        tot_sales_val = overview_data['total_sales']
+        tot_sales_lakh = tot_sales_val / 100000.0
+        st.metric(
+            "💰 Total Sale",
+            f"₹{tot_sales_val:,.2f}",
+            delta=f"₹{tot_sales_lakh:.2f} Lakhs",
+            help="Aggregate historical transaction value extracted from MARG sales data."
+        )
+    with col_k3:
+        tot_dues_val = overview_data['total_dues']
+        tot_dues_lakh = tot_dues_val / 100000.0
+        st.metric(
+            "💳 Customer Dues (Debit)",
+            f"₹{tot_dues_val:,.2f}",
+            delta=f"₹{tot_dues_lakh:.2f} Lakhs",
+            help="Total outstanding amount customers owe to the company from Master Ledger (Debit)."
+        )
+    with col_k4:
+        tot_pay_val = overview_data['total_payable']
+        tot_pay_lakh = tot_pay_val / 100000.0
+        st.metric(
+            "🏢 Company Payable (Credit)",
+            f"₹{tot_pay_val:,.2f}",
+            delta=f"₹{tot_pay_lakh:.2f} Lakhs",
+            help="Total liabilities / credit balance the company owes to parties (Credit)."
+        )
+
+    # Customer Categorization Widget by Sales Slabs (Bins)
+    st.markdown("""
+    <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 10px; padding: 12px 16px; margin-top: 14px; margin-bottom: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 1.05rem; font-weight: 700; color: #0F172A;">
+                🏷️ Customer Category by Sales Slabs (Revenue Bins)
+            </div>
+            <div style="font-size: 0.82rem; color: #475569; font-weight: 600;">
+                Bins: 0–2 Lakh | >2–5 Lakh | >5–8 Lakh | >8–12 Lakh | >12–20 Lakh | >20 Lakh
+            </div>
+        </div>
+        <div style="font-size: 0.83rem; color: #475569; margin-top: 3px;">
+            Distribution of customers based on total historical purchases transacted in MARG ERP.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    bins_list = overview_data.get('customer_sales_bins', [])
+    col_b = st.columns(len(bins_list))
+    color_accents = ["#0284C7", "#0D9488", "#16A34A", "#D97706", "#EA580C", "#7C3AED"]
+
+    for idx, b_item in enumerate(bins_list):
+        with col_b[idx]:
+            b_cnt = b_item['customer_count']
+            b_sales = b_item['total_sales']
+            b_sales_l = b_sales / 100000.0
+            b_cpct = b_item['customer_percentage']
+            b_spct = b_item['sales_percentage']
+            border_c = color_accents[idx % len(color_accents)]
+
+            st.markdown(f"""
+            <div style="background: white; border-top: 4px solid {border_c}; border: 1px solid #E2E8F0; border-top-color: {border_c}; border-radius: 8px; padding: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); text-align: center; min-height: 110px;">
+                <div style="font-size: 0.82rem; font-weight: 700; color: #334155; margin-bottom: 2px;">{b_item['bin_label']}</div>
+                <div style="font-size: 1.25rem; font-weight: 800; color: {border_c};">{b_cnt} <span style="font-size: 0.72rem; font-weight: 500; color: #64748B;">({b_cpct}%)</span></div>
+                <div style="font-size: 0.85rem; font-weight: 700; color: #1E293B; margin-top: 4px;">₹{b_sales_l:,.2f} L</div>
+                <div style="font-size: 0.70rem; color: #64748B;">{b_spct}% of revenue</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Interactive Slab Filter
+    bin_options = ["All Slabs"] + [b['bin_label'] for b in bins_list]
+    bin_label_to_codes = {b['bin_label']: set(b['customer_codes']) for b in bins_list}
+
+    selected_slab = st.segmented_control(
+        "🎯 Filter Customer Selection by Sales Slab:",
+        options=bin_options,
+        default="All Slabs",
+        key="sales_selected_slab_control"
+    )
+
+    st.markdown("---")
 
     # Section 3: Cascading Category / Group and Customer Selector Dropdowns
     st.markdown("### 👤 Select Customer by Category / Group")
@@ -271,9 +417,15 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     else:
         filtered_customers = customers
 
+    # Further filter by selected sales slab if a specific slab is selected
+    if selected_slab and selected_slab != "All Slabs":
+        allowed_codes = bin_label_to_codes.get(selected_slab, set())
+        filtered_customers = [c for c in filtered_customers if c['customer_code'] in allowed_codes]
+
     if not filtered_customers:
-        st.warning(f"No customers found in category '{selected_group}'.")
+        st.warning(f"No customers found matching Category '{selected_group}' and Sales Slab '{selected_slab}'.")
         return
+
 
     cust_options = []
     cust_code_map = {}

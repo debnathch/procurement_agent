@@ -744,6 +744,13 @@ def list_sales_customer_groups(db: Session = Depends(get_db)):
     return svc.list_customer_groups()
 
 
+@app.get('/sales/overview-metrics', tags=['sales'])
+def get_sales_overview_metrics(db: Session = Depends(get_db)):
+    """Retrieves executive sales KPIs and customer sales revenue categorization slabs (bins)."""
+    svc = SalesIntelligenceService(db)
+    return svc.get_sales_dashboard_overview()
+
+
 @app.get('/sales/customers', tags=['sales'])
 def list_sales_customers(
     search: Optional[str] = None,
