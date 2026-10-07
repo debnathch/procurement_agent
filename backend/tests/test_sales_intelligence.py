@@ -1066,3 +1066,100 @@ def test_product_wise_customer_ledger_reverse_order_ingestion():
     assert summary['transacted_products'][0]['amount'] == 12500.0
 
     session.close()
+
+
+def test_hierarchical_party_item_wise_sales_summary_multi_customer():
+    """
+    Validates parsing and ingestion of multi-customer hierarchical report
+    like MARG 'PARTY / ITEM WISE SALES SUMMARY' (LEDGER_PRODUCT_PARTY.XLS).
+    Ensures that each customer section is isolated and mapped to the right customer
+    rather than all products being attributed to a banner string like 'REPORT FOR : SALE-S/R'.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # 1. First ingest master customer ledger
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'A.B.MEDICINE CENTRE           KATWA',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 55000.00,
+            'Credit': 0.00,
+        },
+        {
+            'Ledger': 'A.B. MEDICINE CENTRE-THIRDPART-PURBA BURDWAN',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 12000.00,
+            'Credit': 500.00,
+        }
+    ])
+    buf_m = io.BytesIO()
+    master_df.to_excel(buf_m, index=False)
+    ingest_svc.ingest_excel(buf_m.getvalue(), filename='LEDGER.XLS')
+
+    # 2. Ingest hierarchical party/item report (simulating LEDGER_PRODUCT_PARTY.XLS)
+    raw_excel_rows = [
+        ['BEN REMEDIES', None, None, None, None, None],
+        ['NETAJI SUBHAS ROAD', None, None, None, None, None],
+        ['PARTY / ITEM WISE SALES SUMMARY FROM 01/04/2026-07/10/2026', None, None, None, None, None],
+        ['Report For : SALE-S/R', None, None, None, None, None],
+        [None, None, None, None, None, None],
+        ['D E S C R I P T I O N', 'QTY.', 'FREE', 'RATE', 'AMOUNT', '( % )'],
+        ['--------------------------------------------------------------------------------------------------', None, None, None, None, None],
+        ['A.B. MEDICINE CENTRE-THIRDPART-PURBA BURDWAN', None, None, None, None, None],
+        ['CEFTAZ 1 GM INJ.', 20.0, 2.0, 250.0, 5000.0, 10.0],
+        [' TOTAL :', 20.0, 2.0, None, 5000.0, None],
+        ['--------------------------------------------------------------------------------------------------', None, None, None, None, None],
+        ['A.B.MEDICINE CENTRE-KATWA', None, None, None, None, None],
+        ['AZITHROMYCIN 500MG TABS', 100.0, 10.0, 110.0, 11000.0, 15.0],
+        ['PAN-D CAPSULE', 50.0, 5.0, 80.0, 4000.0, 5.0],
+        [' TOTAL :', 150.0, 15.0, None, 15000.0, None],
+    ]
+    df_item_summary = pd.DataFrame(raw_excel_rows)
+    buf_i = io.BytesIO()
+    df_item_summary.to_excel(buf_i, header=False, index=False)
+    result = ingest_svc.ingest_excel(buf_i.getvalue(), filename='LEDGER_PRODUCT_PARTY.XLS')
+
+    assert result['sales_inserted'] == 3
+
+    # 3. Check customer A.B.MEDICINE CENTRE-KATWA
+    cust_katwa = session.query(Customer).filter_by(customer_code='CUST-ABMEDICINECENTREKATWA').first()
+    assert cust_katwa is not None
+    summary_katwa = sales_svc.get_customer_summary(cust_katwa.customer_code)
+
+    assert summary_katwa['current_dues'] == 55000.00
+    assert len(summary_katwa['transacted_products']) == 2
+    prods_katwa = {p['description']: p for p in summary_katwa['transacted_products']}
+    assert 'AZITHROMYCIN 500MG TABS' in prods_katwa
+    assert prods_katwa['AZITHROMYCIN 500MG TABS']['qty'] == 100.0
+    assert prods_katwa['AZITHROMYCIN 500MG TABS']['free'] == 10.0
+    assert prods_katwa['AZITHROMYCIN 500MG TABS']['amount'] == 11000.0
+
+    assert 'PAN-D CAPSULE' in prods_katwa
+    assert prods_katwa['PAN-D CAPSULE']['qty'] == 50.0
+    assert prods_katwa['PAN-D CAPSULE']['free'] == 5.0
+    assert prods_katwa['PAN-D CAPSULE']['amount'] == 4000.0
+
+    totals_katwa = summary_katwa['product_totals']
+    assert totals_katwa['total_qty'] == 150.0
+    assert totals_katwa['total_free'] == 15.0
+    assert totals_katwa['total_amount'] == 15000.0
+
+    # 4. Check customer A.B. MEDICINE CENTRE-THIRDPART-PURBA BURDWAN
+    cust_burdwan = session.query(Customer).filter_by(customer_code='CUST-ABMEDICINECENTRETHIRDPARTPURBABURDWAN').first()
+    assert cust_burdwan is not None
+    summary_burdwan = sales_svc.get_customer_summary(cust_burdwan.customer_code)
+    assert len(summary_burdwan['transacted_products']) == 1
+    assert summary_burdwan['transacted_products'][0]['description'] == 'CEFTAZ 1 GM INJ.'
+    assert summary_burdwan['transacted_products'][0]['qty'] == 20.0
+
+    # 5. Verify NO dummy customer code like CUST-REPORTFORSALESR was created
+    dummy_cust = session.query(Customer).filter_by(customer_code='CUST-REPORTFORSALESR').first()
+    assert dummy_cust is None
+
+    session.close()
+

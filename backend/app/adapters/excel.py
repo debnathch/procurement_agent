@@ -1174,7 +1174,124 @@ class MargExcelParser:
             elif c_norm in ('netamount', 'billamount', 'amount', 'totalamount', 'netamt', 'total', 'debit', 'dramt', 'debitamount'):
                 amt_col = c
 
-        # If customer name is not a column, check banner for individual party ledger header
+        # Check if sheet is a hierarchical Party/Product or Party/Item report
+        # (e.g. 'PARTY / ITEM WISE SALES SUMMARY' or 'Party/Product Wise Net Sales' or 'LEDGER_PRODUCT_PARTY')
+        # where Column 0 contains Party Name headers, followed by product rows, terminated by Total rows.
+        file_lower = filename.lower()
+        is_hierarchical_party_report = not cust_name_col and (
+            any('partyproduct' in _clean_alpha(str(c)) for c in df.columns) or
+            'party/product' in banner_text or
+            'party / product' in banner_text or
+            'party/item' in banner_text or
+            'party / item' in banner_text or
+            'party wise' in banner_text or
+            'item wise' in banner_text or
+            'product_party' in file_lower or
+            'party_product' in file_lower or
+            'customer_product' in file_lower or
+            any('party total' in str(val).lower() for val in df.iloc[:, 0].dropna()[:100]) or
+            # Multi-section heuristic: rows where Column 0 is a party name and numeric columns are NaN/0
+            (len(df.columns) > 1 and any(
+                pd.isna(df.iloc[i, 1]) and (pd.isna(df.iloc[i, min(4, len(df.columns)-1)]) or df.iloc[i, min(4, len(df.columns)-1)] == 0) and
+                isinstance(df.iloc[i, 0], str) and len(str(df.iloc[i, 0]).strip()) > 3 and
+                not any(k in str(df.iloc[i, 0]).upper() for k in ('TOTAL', 'PAGE', 'BEN REMEDIES', 'NETAJI', 'REPORT FOR'))
+                for i in range(min(50, len(df)))
+            ) and any('total' in str(val).lower() for val in df.iloc[:, 0].dropna()[:50]))
+        )
+
+        if is_hierarchical_party_report:
+            h_name_col = df.columns[0]
+            h_qty_col = None
+            h_free_col = None
+            h_rate_col = None
+            h_amt_col = None
+            for c in df.columns[1:]:
+                c_norm = _clean_alpha(c)
+                if c_norm in ('saleqty', 'quantity', 'qty', 'qtysold', 'soldqty', 'billedqty', 'netqty'):
+                    if not h_qty_col:
+                        h_qty_col = c
+                elif c_norm in ('free', 'freeqty', 'freequantity'):
+                    if not h_free_col:
+                        h_free_col = c
+                elif c_norm in ('avrate', 'rate', 'cost', 'unitcost'):
+                    h_rate_col = c
+                elif c_norm in ('netamount', 'amount', 'billamount', 'val', 'value'):
+                    h_amt_col = c
+            if not h_qty_col and len(df.columns) > 1:
+                # If Net Qty is column 3 (like in 'Party/Product Name', 'Sale Qty', 'Ret Qty', 'Net Qty')
+                for c in df.columns:
+                    if _clean_alpha(c) == 'netqty':
+                        h_qty_col = c
+                        break
+                if not h_qty_col:
+                    h_qty_col = df.columns[1]
+
+            current_party = None
+            for row in df.to_dict('records'):
+                val0 = _clean_str(row.get(h_name_col))
+                if not val0:
+                    continue
+
+                val0_upper = val0.upper()
+                if 'TOTAL' in val0_upper or 'SUB TOTAL' in val0_upper:
+                    current_party = None
+                    continue
+
+                if any(k in val0_upper for k in [
+                    'BEN REMEDIES', 'NETAJI SUBHAS', 'GSTIN', 'PHONE', 'E-MAIL',
+                    'PARTY / ITEM WISE', 'PARTY / PRODUCT WISE', 'PARTY/PRODUCT WISE',
+                    'PARTY/PRODUCT NAME', 'CONTINUED', 'PAGE NO', 'OUR SOFTWARE MARG',
+                    'MARG ERP', 'REPORT FOR', 'COMPANY :'
+                ]):
+                    continue
+
+                qty = _parse_float(row.get(h_qty_col), 0.0) if h_qty_col else 0.0
+                free = _parse_float(row.get(h_free_col), 0.0) if h_free_col else 0.0
+                rate = _parse_float(row.get(h_rate_col), 0.0) if h_rate_col else 0.0
+                amt = _parse_float(row.get(h_amt_col), 0.0) if h_amt_col else (qty * rate)
+
+                # If no quantity or amount, this is a Party Name header
+                if qty <= 0 and free <= 0 and amt <= 0:
+                    clean_p = normalize_customer_name(val0)
+                    if clean_p and len(clean_p) > 2 and not any(k in clean_p.upper() for k in ('TOTAL', 'BEN REMEDIES', 'REPORT FOR', 'COMPANY')):
+                        current_party = clean_p
+                    continue
+
+                # If we have a quantity, this is a product line under current_party
+                if current_party and (qty > 0 or free > 0 or amt > 0):
+                    c_name = current_party
+                    c_code = generate_customer_code(c_name)
+                    code = _make_stable_code(val0)
+                    effective_rate = rate if rate > 0 else round(amt / qty, 2) if qty > 0 else 0.0
+
+                    out['sales_history'].append({
+                        'product_code': code,
+                        'product_name': val0,
+                        'sale_date': end_date,
+                        'qty_sold': round(qty, 4),
+                        'free_qty': round(free, 4),
+                        'channel': 'retail',
+                        'customer_code': c_code,
+                        'customer_name': c_name,
+                        'invoice_no': f"TXN-{code}-{len(out['sales_history'])+1}",
+                        'rate': effective_rate,
+                        'amount': round(amt, 2),
+                    })
+
+                    if c_code and c_name and 'customers' in out:
+                        seen_c = {c['customer_code'] for c in out['customers']}
+                        if c_code not in seen_c:
+                            out['customers'].append({
+                                'customer_code': c_code,
+                                'customer_name': c_name,
+                                'district': 'West Bengal',
+                                'salesperson': 'Sales Team',
+                                'credit_limit': 0.0,
+                                'status': 'ACTIVE',
+                            })
+            return
+
+        # Single Customer / Party Ledger: Check banner for individual party ledger header
         banner_party = None
         if not cust_name_col and banner_text:
             m_party = re.search(
@@ -1215,11 +1332,12 @@ class MargExcelParser:
                     )):
                         continue
                     # Ignore report title tokens
-                    if any(s_upper == t or s_upper.startswith(t + ' ') or s_upper.endswith(' ' + t) for t in (
+                    if any(s_upper == t or s_upper.startswith(t + ' ') or s_upper.startswith(t + ':') or s_upper.startswith(t + ' :') or s_upper.endswith(' ' + t) for t in (
                         'SALES REPORT', 'SALE REPORT', 'SALES SUMMARY', 'SALE SUMMARY', 'PRODUCT WISE',
                         'CUSTOMER WISE', 'PARTY WISE', 'ITEM WISE', 'STATEMENT', 'LEDGER', 'SUMMARY',
                         'REGISTER', 'OUR SOFTWARE MARG', 'MARG ERP', 'PAGE NO', 'PAGE', 'DETAIL',
-                        'PARTY/PRODUCT WISE', 'PARTY/PRODUCT', 'PURCHASE REPORT', 'STOCK REPORT'
+                        'PARTY/PRODUCT WISE', 'PARTY/PRODUCT', 'PURCHASE REPORT', 'STOCK REPORT',
+                        'REPORT FOR', 'COMPANY', 'COMPANY :'
                     )):
                         continue
 
@@ -1257,97 +1375,6 @@ class MargExcelParser:
                         break
                     if not banner_party:
                         banner_party = clean_src
-
-        # Check if sheet is a hierarchical Party/Product report (e.g. Party/Product Wise Net Sales)
-        # where Column 0 contains Party Name headers, followed by product rows, terminated by Party Total.
-        is_hierarchical_party_report = not cust_name_col and (
-            any('partyproduct' in _clean_alpha(str(c)) for c in df.columns) or
-            'party/product' in banner_text or
-            'party / product' in banner_text or
-            any('party total' in str(val).lower() for val in df.iloc[:, 0].dropna()[:100])
-        )
-
-        if is_hierarchical_party_report:
-            h_name_col = df.columns[0]
-            h_qty_col = None
-            h_free_col = None
-            h_rate_col = None
-            h_amt_col = None
-            for c in df.columns[1:]:
-                c_norm = _clean_alpha(c)
-                if c_norm in ('saleqty', 'quantity', 'qty', 'qtysold', 'soldqty', 'billedqty', 'netqty'):
-                    if not h_qty_col:
-                        h_qty_col = c
-                elif c_norm in ('free', 'freeqty', 'freequantity'):
-                    if not h_free_col:
-                        h_free_col = c
-                elif c_norm in ('avrate', 'rate', 'cost', 'unitcost'):
-                    h_rate_col = c
-                elif c_norm in ('netamount', 'amount', 'billamount', 'val', 'value'):
-                    h_amt_col = c
-            if not h_qty_col and len(df.columns) > 1:
-                h_qty_col = df.columns[1]
-
-            current_party = None
-            for row in df.to_dict('records'):
-                val0 = _clean_str(row.get(h_name_col))
-                if not val0:
-                    continue
-
-                val0_upper = val0.upper()
-                if 'PARTY TOTAL' in val0_upper or val0_upper == 'TOTAL' or 'GRAND TOTAL' in val0_upper:
-                    current_party = None
-                    continue
-
-                if any(k in val0_upper for k in [
-                    'BEN REMEDIES', 'NETAJI SUBHAS', 'GSTIN', 'PHONE', 'E-MAIL',
-                    'PARTY/PRODUCT WISE', 'PARTY/PRODUCT NAME', 'CONTINUED', 'PAGE NO',
-                    'OUR SOFTWARE MARG', 'MARG ERP', 'SUB TOTAL'
-                ]):
-                    continue
-
-                qty = _parse_float(row.get(h_qty_col), 0.0) if h_qty_col else 0.0
-                free = _parse_float(row.get(h_free_col), 0.0) if h_free_col else 0.0
-                rate = _parse_float(row.get(h_rate_col), 0.0) if h_rate_col else 0.0
-                amt = _parse_float(row.get(h_amt_col), 0.0) if h_amt_col else (qty * rate)
-
-                # If no quantity or amount, this is a Party Name header
-                if qty <= 0 and free <= 0 and amt <= 0:
-                    current_party = normalize_customer_name(val0)
-                    continue
-
-                # If we have a quantity, this is a product line under current_party
-                if current_party and (qty > 0 or free > 0 or amt > 0):
-                    c_name = current_party
-                    c_code = generate_customer_code(c_name)
-                    code = _make_stable_code(val0)
-
-                    out['sales_history'].append({
-                        'product_code': code,
-                        'product_name': val0,
-                        'sale_date': end_date,
-                        'qty_sold': round(qty, 4),
-                        'free_qty': round(free, 4),
-                        'channel': 'retail',
-                        'customer_code': c_code,
-                        'customer_name': c_name,
-                        'invoice_no': f"TXN-{code}-{len(out['sales_history'])+1}",
-                        'rate': rate if rate > 0 else round(amt / qty, 2) if qty > 0 else 0.0,
-                        'amount': round(amt, 2),
-                    })
-
-                    if c_code and c_name and 'customers' in out:
-                        seen_c = {c['customer_code'] for c in out['customers']}
-                        if c_code not in seen_c:
-                            out['customers'].append({
-                                'customer_code': c_code,
-                                'customer_name': c_name,
-                                'district': 'West Bengal',
-                                'salesperson': 'Sales Team',
-                                'credit_limit': 0.0,
-                                'status': 'ACTIVE',
-                            })
-            return
 
         if not name_col:
             name_col = df.columns[0]
