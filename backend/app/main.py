@@ -766,6 +766,17 @@ def get_customer_summary(
     return svc.get_customer_summary(customer_code)
 
 
+@app.get('/sales/customers/{customer_code}/products', tags=['sales'])
+def get_customer_transacted_products(
+    customer_code: str,
+    db: Session = Depends(get_db)
+):
+    """Retrieves the list of products transacted by a customer from the Product-Wise Customer Ledger."""
+    svc = SalesIntelligenceService(db)
+    summary = svc.get_customer_summary(customer_code)
+    return summary.get('transacted_products', [])
+
+
 @app.get('/sales/customers/{customer_code}/recommendations', tags=['sales'])
 def get_customer_recommendations(
     customer_code: str,

@@ -495,23 +495,168 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
     # TAB 3: Purchase History
     with tab_history:
-        st.subheader("📜 Historical Sales Transactions")
+        st.subheader("📜 Customer Purchase History & Transacted Products")
+        st.markdown(
+            "Complete product portfolio and sales transactions transacted by this customer, "
+            "extracted from the **Product-Wise Customer Ledger**."
+        )
+
+        transacted_products = summary.get('transacted_products', [])
         recent_orders = summary.get('recent_orders', [])
-        if not recent_orders:
-            st.info("ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: Each transaction, invoice number, product sale, quantity sold, rate, and amount will be displayed here once product-wise sales transactions (Uploader 2 above) are ingested.")
+
+        # Fallback aggregation in case frontend received raw recent_orders without transacted_products
+        if not transacted_products and recent_orders:
+            p_map = {}
+            for r in recent_orders:
+                p_code = r.get('product_code', 'UNKNOWN')
+                p_name = r.get('product_name', p_code)
+                qty = float(r.get('qty', 0.0) or 0.0)
+                amt = float(r.get('amount', 0.0) or 0.0)
+                rate = float(r.get('rate', 0.0) or 0.0)
+                dt = r.get('date', 'N/A')
+                if p_code not in p_map:
+                    p_map[p_code] = {
+                        'product_code': p_code,
+                        'product_name': p_name,
+                        'company': 'General',
+                        'category': 'Tablets',
+                        'total_qty': 0.0,
+                        'total_amount': 0.0,
+                        'order_count': 0,
+                        'rates': [],
+                        'last_purchase_date': dt,
+                    }
+                entry = p_map[p_code]
+                entry['total_qty'] += qty
+                entry['total_amount'] += amt
+                entry['order_count'] += 1
+                if rate > 0:
+                    entry['rates'].append(rate)
+                if dt != 'N/A':
+                    entry['last_purchase_date'] = dt
+
+            for p_code, p_info in p_map.items():
+                rates = p_info['rates']
+                avg_r = round(sum(rates) / len(rates), 2) if rates else (
+                    round(p_info['total_amount'] / p_info['total_qty'], 2) if p_info['total_qty'] > 0 else 0.0
+                )
+                transacted_products.append({
+                    'product_code': p_info['product_code'],
+                    'product_name': p_info['product_name'],
+                    'company': p_info['company'],
+                    'category': p_info['category'],
+                    'total_qty': round(p_info['total_qty'], 2),
+                    'total_amount': round(p_info['total_amount'], 2),
+                    'avg_rate': avg_r,
+                    'order_count': p_info['order_count'],
+                    'last_purchase_date': p_info['last_purchase_date'],
+                })
+            transacted_products.sort(key=lambda x: x['total_amount'], reverse=True)
+
+        if not transacted_products and not recent_orders:
+            st.info(
+                "ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: "
+                "The product list transacted by this customer, quantities, rates, and historical sales transactions "
+                "will appear here once the **Product-Wise Customer Ledger** (.xlsx/.xls) is ingested using Uploader 2 above."
+            )
         else:
-            df_orders = pd.DataFrame(recent_orders)
-            df_orders.rename(columns={
-                'invoice_no': 'Invoice No',
-                'date': 'Invoice Date',
-                'product_code': 'Item Code',
-                'product_name': 'Product Name',
-                'batch_no': 'Batch',
-                'qty': 'Quantity Sold',
-                'rate': 'Rate (₹)',
-                'amount': 'Net Amount (₹)',
-            }, inplace=True)
-            st.dataframe(df_orders, use_container_width=True, hide_index=True)
+            col_hp1, col_hp2, col_hp3, col_hp4 = st.columns(4)
+            with col_hp1:
+                st.metric("Unique Products Transacted", len(transacted_products))
+            with col_hp2:
+                tot_units = sum(p.get('total_qty', 0.0) for p in transacted_products)
+                st.metric("Total Units Transacted", f"{tot_units:,.1f}")
+            with col_hp3:
+                tot_val = sum(p.get('total_amount', 0.0) for p in transacted_products)
+                st.metric("Total Transacted Value", f"₹{tot_val:,.2f}")
+            with col_hp4:
+                st.metric("Total Invoices / Orders", total_orders)
+
+            st.markdown("---")
+
+            sub_tab_products, sub_tab_txns = st.tabs([
+                f"📦 Transacted Products List ({len(transacted_products)} Products)",
+                f"🧾 Detailed Invoices & Transactions ({len(recent_orders)} Records)"
+            ])
+
+            with sub_tab_products:
+                st.markdown(
+                    "**Customer Product Portfolio**: All products transacted by this customer from the **Product-Wise Customer Ledger**."
+                )
+                search_query = st.text_input(
+                    "🔍 Filter Transacted Products:",
+                    placeholder="Search by product name or item code...",
+                    key=f"search_prods_{selected_code}"
+                )
+
+                filtered_prods = transacted_products
+                if search_query and search_query.strip():
+                    sq = search_query.strip().lower()
+                    filtered_prods = [
+                        p for p in transacted_products
+                        if sq in str(p.get('product_name', '')).lower() or sq in str(p.get('product_code', '')).lower()
+                    ]
+
+                if not filtered_prods:
+                    st.warning(f"No transacted products found matching '{search_query}'.")
+                else:
+                    df_prods = pd.DataFrame(filtered_prods)
+                    cols_to_use = [
+                        c for c in ['product_name', 'product_code', 'company', 'total_qty', 'avg_rate', 'total_amount', 'order_count', 'last_purchase_date']
+                        if c in df_prods.columns
+                    ]
+                    df_display_prods = df_prods[cols_to_use].copy()
+                    df_display_prods.rename(columns={
+                        'product_name': 'Product Name',
+                        'product_code': 'Item Code',
+                        'company': 'Company / Brand',
+                        'total_qty': 'Total Qty Transacted',
+                        'avg_rate': 'Avg Rate (₹)',
+                        'total_amount': 'Total Value (₹)',
+                        'order_count': 'Order Frequency',
+                        'last_purchase_date': 'Last Purchased',
+                    }, inplace=True)
+
+                    st.dataframe(df_display_prods, use_container_width=True, hide_index=True)
+
+                    csv_prods = df_display_prods.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label=f"📥 Download Transacted Products CSV ({cust_name})",
+                        data=csv_prods,
+                        file_name=f"{selected_code}_transacted_products.csv",
+                        mime="text/csv",
+                        key=f"btn_dl_prods_{selected_code}"
+                    )
+
+            with sub_tab_txns:
+                st.markdown("**Detailed Sales Transaction Log**: Line-by-line sales orders and invoice entries.")
+                if not recent_orders:
+                    st.info("No detailed transaction rows available.")
+                else:
+                    df_orders = pd.DataFrame(recent_orders)
+                    rename_cols = {
+                        'invoice_no': 'Invoice / Voucher No',
+                        'date': 'Invoice Date',
+                        'product_name': 'Product Name',
+                        'product_code': 'Item Code',
+                        'batch_no': 'Batch',
+                        'qty': 'Quantity Sold',
+                        'rate': 'Rate (₹)',
+                        'amount': 'Net Amount (₹)',
+                    }
+                    avail_cols = [c for c in ['invoice_no', 'date', 'product_name', 'product_code', 'batch_no', 'qty', 'rate', 'amount'] if c in df_orders.columns]
+                    df_display_orders = df_orders[avail_cols].copy()
+                    df_display_orders.rename(columns=rename_cols, inplace=True)
+                    st.dataframe(df_display_orders, use_container_width=True, hide_index=True)
+
+                    csv_txns = df_display_orders.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label=f"📥 Download Invoices & Transactions CSV ({cust_name})",
+                        data=csv_txns,
+                        file_name=f"{selected_code}_sales_transactions.csv",
+                        mime="text/csv",
+                        key=f"btn_dl_txns_{selected_code}"
+                    )
 
     # TAB 4: Customer Dues & Liabilities Ageing
     with tab_ageing:

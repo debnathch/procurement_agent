@@ -17,7 +17,9 @@ from sqlalchemy.orm import Session
 from backend.app.models.entities import (
     Customer, CustomerReceivable, SalesHistory, InventoryBatch, Product
 )
-from backend.app.adapters.excel import pharma_canonical_key
+from backend.app.adapters.excel import (
+    pharma_canonical_key, customer_canonical_key, normalize_customer_name
+)
 from backend.app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,42 @@ class SalesIntelligenceService:
             })
         return sorted(results, key=lambda x: x['customer_name'].upper())
 
+    def _get_customer_sales(self, customer_code: str, cust_name: str) -> list[SalesHistory]:
+        """
+        Retrieves all sales records for a customer, matching by:
+        - Customer Code
+        - Customer Name (case-insensitive)
+        - Canonical name/code variations
+        """
+        matching_codes = {customer_code}
+        matching_names = {cust_name.strip().upper()}
+        c_norm = normalize_customer_name(cust_name)
+        if c_norm:
+            matching_names.add(c_norm.upper())
+        c_key = customer_canonical_key(cust_name)
+        if c_key:
+            matching_codes.add(f"CUST-{c_key[:40]}")
+            matching_codes.add(f"CUST-{c_key[:25]}")
+
+        sales_records = self.db.scalars(
+            select(SalesHistory)
+            .where(
+                (SalesHistory.customer_code.in_(matching_codes)) |
+                (func.upper(SalesHistory.customer_name).in_(matching_names))
+            )
+            .order_by(desc(SalesHistory.sale_date))
+        ).all()
+
+        if not sales_records and c_key:
+            # Fallback scan in case of legacy records
+            all_sales = self.db.scalars(select(SalesHistory)).all()
+            for s in all_sales:
+                s_name = s.customer_name or ''
+                if customer_canonical_key(s_name) == c_key:
+                    sales_records.append(s)
+
+        return sales_records
+
     def get_customer_summary(self, customer_code: str) -> dict[str, Any]:
         """
         Computes detailed financial and operational summary for a single customer:
@@ -169,14 +207,11 @@ class SalesIntelligenceService:
         credit_limit = customer.credit_limit if customer else 0.0
 
         # 2. Sales Transactions for this customer
-        sales_records = self.db.scalars(
-            select(SalesHistory)
-            .where(
-                (SalesHistory.customer_code == customer_code) |
-                (func.lower(SalesHistory.customer_name) == func.lower(cust_name))
-            )
-            .order_by(desc(SalesHistory.sale_date))
-        ).all()
+        sales_records = self._get_customer_sales(customer_code, cust_name)
+
+        prod_catalog = {
+            p.product_code: p for p in self.db.scalars(select(Product)).all()
+        }
 
         total_sales = 0.0
         sales_30d = 0.0
@@ -185,6 +220,8 @@ class SalesIntelligenceService:
         last_order_dt = None
 
         recent_orders = []
+        prod_agg: dict[str, dict[str, Any]] = {}
+
         for s in sales_records:
             amt = s.amount if (s.amount and s.amount > 0) else (s.qty_sold * (s.rate or 0.0))
             if amt <= 0 and s.qty_sold > 0:
@@ -212,6 +249,55 @@ class SalesIntelligenceService:
                 'rate': s.rate or 0.0,
                 'amount': round(amt, 2),
             })
+
+            # Aggregate into Transacted Products Portfolio
+            p_code = s.product_code or 'UNKNOWN'
+            p_name = (s.product_name or p_code).strip()
+            if p_code not in prod_agg:
+                p_cat_obj = prod_catalog.get(p_code)
+                prod_agg[p_code] = {
+                    'product_code': p_code,
+                    'product_name': p_name,
+                    'company': getattr(p_cat_obj, 'company', None) or getattr(s, 'channel', None) or 'General',
+                    'category': getattr(p_cat_obj, 'category', None) or 'Tablets',
+                    'total_qty': 0.0,
+                    'total_amount': 0.0,
+                    'order_count': 0,
+                    'rates': [],
+                    'last_purchase_date': None,
+                    'last_purchase_date_str': 'N/A',
+                }
+            entry = prod_agg[p_code]
+            if p_name and (not entry['product_name'] or entry['product_name'] == p_code):
+                entry['product_name'] = p_name
+            entry['total_qty'] += s.qty_sold
+            entry['total_amount'] += amt
+            entry['order_count'] += 1
+            if s.rate and s.rate > 0:
+                entry['rates'].append(s.rate)
+            if s.sale_date:
+                if not entry['last_purchase_date'] or s.sale_date > entry['last_purchase_date']:
+                    entry['last_purchase_date'] = s.sale_date
+                    entry['last_purchase_date_str'] = s.sale_date.strftime('%d-%b-%Y')
+
+        transacted_products = []
+        for p_code, p_info in prod_agg.items():
+            rates = p_info['rates']
+            avg_rate = round(sum(rates) / len(rates), 2) if rates else (
+                round(p_info['total_amount'] / p_info['total_qty'], 2) if p_info['total_qty'] > 0 else 0.0
+            )
+            transacted_products.append({
+                'product_code': p_info['product_code'],
+                'product_name': p_info['product_name'],
+                'company': p_info['company'],
+                'category': p_info['category'],
+                'total_qty': round(p_info['total_qty'], 2),
+                'total_amount': round(p_info['total_amount'], 2),
+                'avg_rate': avg_rate,
+                'order_count': p_info['order_count'],
+                'last_purchase_date': p_info['last_purchase_date_str'],
+            })
+        transacted_products.sort(key=lambda x: x['total_amount'], reverse=True)
 
         total_orders = len(invoices_set) if invoices_set else len(sales_records)
         days_since_last_order = (now - last_order_dt).days if last_order_dt else None
@@ -299,7 +385,8 @@ class SalesIntelligenceService:
             'days_since_last_order': days_since_last_order if days_since_last_order is not None else 'N/A',
             'ageing': {k: round(v, 2) for k, v in ageing.items()},
             'pending_invoices': pending_invoices,
-            'recent_orders': recent_orders[:100],
+            'transacted_products': transacted_products,
+            'recent_orders': recent_orders[:500],
         }
 
     def get_customer_recommendations(self, customer_code: str) -> dict[str, list[dict[str, Any]]]:
@@ -318,12 +405,7 @@ class SalesIntelligenceService:
         ).first()
         cust_name = customer.customer_name if customer else customer_code
 
-        sales = self.db.scalars(
-            select(SalesHistory).where(
-                (SalesHistory.customer_code == customer_code) |
-                (func.lower(SalesHistory.customer_name) == func.lower(cust_name))
-            )
-        ).all()
+        sales = self._get_customer_sales(customer_code, cust_name)
 
         prod_history = defaultdict(list)
         for s in sales:

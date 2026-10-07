@@ -821,4 +821,92 @@ def test_cross_excel_reverse_upload_order_mapping():
     session.close()
 
 
+def test_purchase_history_transacted_products_from_product_wise_ledger():
+    """
+    Test that the Purchase History tab / customer summary provides the complete
+    transacted product portfolio extracted from the Product-Wise Customer Ledger Excel:
+    - Lists each unique product transacted by the customer.
+    - Aggregates total quantities purchased, order counts, and values.
+    - Preserves detailed line-by-line transactions.
+    """
+    from backend.app.main import get_customer_transacted_products
+
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # 1. Product catalog
+    p1 = Product(product_code='MED-AMX500', product_name='AMX-500 TAB 10X10', company='Cipla', category='Antibiotics', unit_cost=50.0, reorder_enabled=True)
+    p2 = Product(product_code='MED-PCM650', product_name='PCM-650 TAB 10X10', company='Apex', category='Analgesics', unit_cost=25.0, reorder_enabled=True)
+    session.add_all([p1, p2])
+    session.commit()
+
+    ingest_svc = IngestionService(session)
+    sales_svc = SalesIntelligenceService(session)
+
+    # 2. Ingest Master Customer Ledger
+    master_df = pd.DataFrame([
+        {
+            'Ledger': 'APEX PHARMACY - DURGAPUR',
+            'Group': 'RETAIL CHEMIST',
+            'Debit': 25000.0,
+            'Credit': 1000.0,
+        }
+    ])
+    buf_m = io.BytesIO()
+    master_df.to_excel(buf_m, index=False)
+    ingest_svc.ingest_excel(buf_m.getvalue(), filename='CUSTOMER_MASTER_LEDGER.XLS')
+
+    # 3. Ingest Product-Wise Customer Ledger
+    hierarchical_data = [
+        {'Party/Product Name': 'Party/Product Wise Net Sales From 01/04/2026 To 03/10/2026', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'BEN REMEDIES', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'APEX PHARMACY - DURGAPUR', 'Sale Qty': None, 'Ret Qty': None, 'Net Qty': None},
+        {'Party/Product Name': 'AMX-500 TAB 10X10', 'Sale Qty': 100.0, 'Ret Qty': 0.0, 'Net Qty': 100.0},
+        {'Party/Product Name': 'PCM-650 TAB 10X10', 'Sale Qty': 200.0, 'Ret Qty': 0.0, 'Net Qty': 200.0},
+        {'Party/Product Name': 'AMX-500 TAB 10X10', 'Sale Qty': 50.0, 'Ret Qty': 0.0, 'Net Qty': 50.0},
+        {'Party/Product Name': 'Party Total :', 'Sale Qty': 350.0, 'Ret Qty': 0.0, 'Net Qty': 350.0},
+    ]
+    buf_p = io.BytesIO()
+    pd.DataFrame(hierarchical_data).to_excel(buf_p, index=False)
+    ingest_svc.ingest_excel(buf_p.getvalue(), filename='CUSTOMER_PRODUCT_LEDGER.XLS')
+
+    # 4. Verify Customer Summary
+    cust = session.query(Customer).first()
+    assert cust is not None
+    summary = sales_svc.get_customer_summary(cust.customer_code)
+
+    assert 'transacted_products' in summary
+    t_prods = summary['transacted_products']
+    assert len(t_prods) == 2, f"Expected 2 transacted products, got: {t_prods}"
+
+    # Map by product name
+    prod_map = {p['product_name']: p for p in t_prods}
+    assert 'AMX-500 TAB 10X10' in prod_map
+    assert 'PCM-650 TAB 10X10' in prod_map
+
+    amx = prod_map['AMX-500 TAB 10X10']
+    assert amx['total_qty'] == 150.0
+    assert amx['order_count'] == 2
+    assert amx['total_amount'] == 150.0 * 50.0  # 7500.0
+    assert amx['company'] == 'Cipla'
+
+    pcm = prod_map['PCM-650 TAB 10X10']
+    assert pcm['total_qty'] == 200.0
+    assert pcm['order_count'] == 1
+    assert pcm['total_amount'] == 200.0 * 25.0  # 5000.0
+    assert pcm['company'] == 'Apex'
+
+    # Check recent orders transaction log
+    assert len(summary['recent_orders']) == 3
+
+    # 5. Verify route get_customer_transacted_products
+    api_prods = get_customer_transacted_products(cust.customer_code, db=session)
+    assert len(api_prods) == 2
+    assert {p['product_name'] for p in api_prods} == {'AMX-500 TAB 10X10', 'PCM-650 TAB 10X10'}
+
+    session.close()
+
+
+
 
