@@ -24,6 +24,17 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+
+# Ensure Playwright finds browser cache regardless of any HOME environment override
+for _candidate_dir in [
+    Path("/Users/debz/Library/Caches/ms-playwright"),
+    Path.home() / "Library/Caches/ms-playwright",
+    Path(os.path.expanduser("~")) / "Library/Caches/ms-playwright",
+]:
+    if _candidate_dir.exists():
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_candidate_dir))
+        break
+
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ── Configuration ────────────────────────────────────────────────────────────

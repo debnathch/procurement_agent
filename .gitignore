@@ -55,3 +55,4 @@ outbox/
 
 # Streamlit local runtime cache
 .streamlit/
+Library/

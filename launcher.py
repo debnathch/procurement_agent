@@ -96,6 +96,9 @@ def supervisor():
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(BUNDLE_DIR)
+    real_pw_cache = Path("/Users/debz/Library/Caches/ms-playwright")
+    if real_pw_cache.exists():
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(real_pw_cache)
     env["HOME"] = str(BUNDLE_DIR)
     env["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 
