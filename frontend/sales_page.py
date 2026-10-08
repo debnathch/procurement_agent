@@ -340,41 +340,93 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     # Top Executive KPI Cards (Filtered by Category)
     cat_title_suffix = f" — {selected_group}" if selected_group != "All" else " (All Categories)"
     st.markdown(f"### 📊 Sales Overview & Calculations{cat_title_suffix}")
-    col_k1, col_k2, col_k3, col_k4 = st.columns(4)
-    with col_k1:
-        st.metric(
-            "👥 Total Customers",
-            f"{overview_data['total_customers']:,}",
-            delta=f"{overview_data['active_customers']} Active Buyers",
-            help=f"Total customer accounts in {selected_group} across MARG Master Ledger & Product Sales Ledger."
-        )
-    with col_k2:
-        tot_sales_val = overview_data['total_sales']
-        tot_sales_lakh = tot_sales_val / 100000.0
-        st.metric(
-            "💰 Total Sale",
-            f"₹{tot_sales_val:,.2f}",
-            delta=f"₹{tot_sales_lakh:.2f} Lakhs",
-            help=f"Aggregate sales turnover for customer category '{selected_group}'."
-        )
-    with col_k3:
-        tot_dues_val = overview_data['total_dues']
-        tot_dues_lakh = tot_dues_val / 100000.0
-        st.metric(
-            "💳 Customer Dues (Debit)",
-            f"₹{tot_dues_val:,.2f}",
-            delta=f"₹{tot_dues_lakh:.2f} Lakhs",
-            help=f"Total outstanding amount owed by customers in '{selected_group}' (Debit)."
-        )
-    with col_k4:
-        tot_pay_val = overview_data['total_payable']
-        tot_pay_lakh = tot_pay_val / 100000.0
-        st.metric(
-            "🏢 Company Payable (Credit)",
-            f"₹{tot_pay_val:,.2f}",
-            delta=f"₹{tot_pay_lakh:.2f} Lakhs",
-            help=f"Total liability / credit amount company owes to customers in '{selected_group}' (Credit)."
-        )
+
+    is_sundry_debtors = ("SUNDRY DEBTORS" in selected_group.strip().upper())
+
+    if is_sundry_debtors:
+        # For SUNDRY DEBTORS: Explicitly showcase Total Debtors, Active Buyers, and Non-Active Buyers
+        col_k1, col_k2, col_k3, col_k4, col_k5 = st.columns(5)
+        with col_k1:
+            st.metric(
+                "👥 Total Debtors",
+                f"{overview_data['total_customers']:,}",
+                help="Total registered party accounts under SUNDRY DEBTORS across MARG ledgers."
+            )
+        with col_k2:
+            act_cnt = overview_data['active_customers']
+            tot_cnt = overview_data['total_customers']
+            act_pct = (act_cnt / tot_cnt * 100.0) if tot_cnt > 0 else 0.0
+            st.metric(
+                "🛒 Active Buyers",
+                f"{act_cnt:,}",
+                delta=f"{act_pct:.1f}% transacted",
+                help="Debtors with at least one recorded purchase transaction (Total Sales > ₹0)."
+            )
+        with col_k3:
+            inact_cnt = overview_data.get('inactive_customers', tot_cnt - act_cnt)
+            inact_pct = (inact_cnt / tot_cnt * 100.0) if tot_cnt > 0 else 0.0
+            st.metric(
+                "💤 Non-Active Buyers",
+                f"{inact_cnt:,}",
+                delta=f"{inact_pct:.1f}% (₹0 Sales)",
+                delta_color="inverse",
+                help="Debtors with zero purchase transactions (Total Sales = ₹0) in the uploaded sales ledger."
+            )
+        with col_k4:
+            tot_sales_val = overview_data['total_sales']
+            tot_sales_lakh = tot_sales_val / 100000.0
+            st.metric(
+                "💰 Total Sale",
+                f"₹{tot_sales_val:,.2f}",
+                delta=f"₹{tot_sales_lakh:.2f} Lakhs",
+                help=f"Aggregate sales turnover for customer category '{selected_group}'."
+            )
+        with col_k5:
+            tot_dues_val = overview_data['total_dues']
+            tot_dues_lakh = tot_dues_val / 100000.0
+            st.metric(
+                "💳 Customer Dues (Debit)",
+                f"₹{tot_dues_val:,.2f}",
+                delta=f"₹{tot_dues_lakh:.2f} Lakhs",
+                help=f"Total outstanding amount owed by customers in '{selected_group}' (Debit)."
+            )
+    else:
+        # Standard 4 KPI cards for other customer categories
+        col_k1, col_k2, col_k3, col_k4 = st.columns(4)
+        with col_k1:
+            st.metric(
+                "👥 Total Customers",
+                f"{overview_data['total_customers']:,}",
+                delta=f"{overview_data['active_customers']} Active Buyers",
+                help=f"Total customer accounts in {selected_group} across MARG Master Ledger & Product Sales Ledger."
+            )
+        with col_k2:
+            tot_sales_val = overview_data['total_sales']
+            tot_sales_lakh = tot_sales_val / 100000.0
+            st.metric(
+                "💰 Total Sale",
+                f"₹{tot_sales_val:,.2f}",
+                delta=f"₹{tot_sales_lakh:.2f} Lakhs",
+                help=f"Aggregate sales turnover for customer category '{selected_group}'."
+            )
+        with col_k3:
+            tot_dues_val = overview_data['total_dues']
+            tot_dues_lakh = tot_dues_val / 100000.0
+            st.metric(
+                "💳 Customer Dues (Debit)",
+                f"₹{tot_dues_val:,.2f}",
+                delta=f"₹{tot_dues_lakh:.2f} Lakhs",
+                help=f"Total outstanding amount owed by customers in '{selected_group}' (Debit)."
+            )
+        with col_k4:
+            tot_pay_val = overview_data['total_payable']
+            tot_pay_lakh = tot_pay_val / 100000.0
+            st.metric(
+                "🏢 Company Payable (Credit)",
+                f"₹{tot_pay_val:,.2f}",
+                delta=f"₹{tot_pay_lakh:.2f} Lakhs",
+                help=f"Total liability / credit amount company owes to customers in '{selected_group}' (Credit)."
+            )
 
     # Customer Categorization Widget by Sales Slabs (Filtered by Category)
     st.markdown(f"""
@@ -431,14 +483,43 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     # Section 3: Customer Selector Dropdown
     st.markdown("### 👤 Select Customer for Detailed Intelligence")
 
+    # Filter by Buyer Activity (Enabled ONLY when Category is SUNDRY DEBTORS)
+    buyer_activity_filter = "All Debtors"
+    if is_sundry_debtors:
+        tot_c = overview_data['total_customers']
+        act_c = overview_data['active_customers']
+        inact_c = overview_data.get('inactive_customers', tot_c - act_c)
+
+        buyer_activity_filter = st.segmented_control(
+            "🎯 Filter SUNDRY DEBTORS by Buyer Activity:",
+            options=[
+                f"All Debtors ({tot_c})",
+                f"🛒 Active Buyers ({act_c})",
+                f"💤 Non-Active Buyers ({inact_c})"
+            ],
+            default=f"All Debtors ({tot_c})",
+            key=f"sales_buyer_activity_filter_{selected_group}"
+        )
+
+    # Determine filtered customer list based on SUNDRY DEBTORS buyer activity filter
+    if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
+        filtered_customers = [c for c in category_customers if c.get('total_sales', 0.0) == 0.0]
+    elif is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("🛒"):
+        filtered_customers = [c for c in category_customers if c.get('total_sales', 0.0) > 0.0]
+    else:
+        filtered_customers = category_customers
+
     # Further filter by selected sales slab if a specific slab is selected
-    filtered_customers = category_customers
     if selected_slab and selected_slab != "All Slabs":
-        allowed_codes = bin_label_to_codes.get(selected_slab, set())
-        filtered_customers = [c for c in filtered_customers if c['customer_code'] in allowed_codes]
+        if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
+            if selected_slab != "0 to 2 Lakh":
+                st.info(f"ℹ️ Non-Active Buyers have ₹0.00 purchases and belong to the '0 to 2 Lakh' sales slab. Displaying all {len(filtered_customers)} Non-Active Buyers.")
+        else:
+            allowed_codes = bin_label_to_codes.get(selected_slab, set())
+            filtered_customers = [c for c in filtered_customers if c['customer_code'] in allowed_codes]
 
     if not filtered_customers:
-        st.warning(f"No customers found matching Category '{selected_group}' and Sales Slab '{selected_slab}'.")
+        st.warning(f"No customers found matching Category '{selected_group}' and the selected filters.")
         return
 
     cust_options = []
@@ -456,13 +537,28 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         label = f"{name} [{grp}] | Dues (Debit): ₹{dues:,.2f} | Liable to Pay (Credit): ₹{cr:,.2f}"
         if tot_s > 0:
             label += f" | Sales: ₹{tot_s:,.2f}"
+        else:
+            label += " | Non-Active (Sales: ₹0.00)"
         cust_options.append(label)
         cust_code_map[label] = code
 
+    filter_tag = "non_active" if (is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤")) else ("active" if (is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("🛒")) else "all")
+    dropdown_title = f"👤 Select Customer ({len(filtered_customers)} accounts"
+    if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
+        dropdown_title += f" Non-Active Buyers in {selected_group}"
+    elif is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("🛒"):
+        dropdown_title += f" Active Buyers in {selected_group}"
+    else:
+        dropdown_title += f" in {selected_group}"
+
+    if selected_slab != "All Slabs" and not (is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤")):
+        dropdown_title += f", Slab: {selected_slab}"
+    dropdown_title += "):"
+
     selected_label = st.selectbox(
-        f"👤 Select Customer ({len(filtered_customers)} accounts in {selected_group}" + (f", Slab: {selected_slab}" if selected_slab != "All Slabs" else "") + "):",
+        dropdown_title,
         options=cust_options,
-        key="sales_selected_customer_label"
+        key=f"sales_selected_customer_label_{selected_group}_{filter_tag}"
     )
 
     selected_code = cust_code_map.get(selected_label)
@@ -491,6 +587,14 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     cust_district = summary.get('district', 'West Bengal')
     cust_salesperson = summary.get('salesperson', 'Sales Team')
     cust_credit_limit = summary.get('credit_limit', 0.0)
+    tot_sales_check = summary.get('total_sales', 0.0)
+
+    status_badge_html = ""
+    if is_sundry_debtors:
+        if tot_sales_check == 0:
+            status_badge_html = ' &nbsp;|&nbsp; <b>Status:</b> <span style="background-color: #FEE2E2; color: #991B1B; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">💤 Non-Active Buyer (₹0 Sales)</span>'
+        else:
+            status_badge_html = ' &nbsp;|&nbsp; <b>Status:</b> <span style="background-color: #DCFCE7; color: #166534; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">🛒 Active Buyer</span>'
 
     st.markdown(f"""
     <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 16px; margin-top: 12px; margin-bottom: 20px;">
@@ -500,7 +604,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             <b>Category / Group:</b> <span style="background-color: #E0E7FF; color: #4338CA; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">{cust_group}</span> &nbsp;|&nbsp;
             <b>District:</b> {cust_district} &nbsp;|&nbsp;
             <b>Salesperson:</b> {cust_salesperson} &nbsp;|&nbsp;
-            <b>Credit Limit:</b> ₹{cust_credit_limit:,.2f}
+            <b>Credit Limit:</b> ₹{cust_credit_limit:,.2f}{status_badge_html}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -731,11 +835,17 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             transacted_products.sort(key=lambda x: x['total_amount'], reverse=True)
 
         if not transacted_products and not recent_orders:
-            st.info(
-                "ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: "
-                "The product list transacted by this customer, quantities, rates, and historical sales transactions "
-                "will appear here once the **Product-Wise Customer Ledger** (.xlsx/.xls) is ingested using Uploader 2 above."
-            )
+            if is_sundry_debtors and tot_sales == 0:
+                st.info(
+                    f"ℹ️ **Non-Active Buyer**: **{cust_name}** has placed no product purchase orders (Sales = ₹0.00) in the uploaded Product-Wise Customer Ledger."
+                    + (f" Outstanding debit balance is **₹{current_dues:,.2f}** from the Master Customer Ledger." if current_dues > 0 else "")
+                )
+            else:
+                st.info(
+                    "ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: "
+                    "The product list transacted by this customer, quantities, rates, and historical sales transactions "
+                    "will appear here once the **Product-Wise Customer Ledger** (.xlsx/.xls) is ingested using Uploader 2 above."
+                )
         else:
             tot_units = product_totals.get('total_qty', sum(float(p.get('qty', p.get('total_qty', 0.0)) or 0.0) for p in transacted_products))
             tot_free = product_totals.get('total_free', sum(float(p.get('free', p.get('total_free', 0.0)) or 0.0) for p in transacted_products))
