@@ -755,18 +755,12 @@ def get_sales_overview_metrics(group: Optional[str] = None, db: Session = Depend
 def list_sales_customers(
     search: Optional[str] = None,
     group: Optional[str] = None,
-    zero_sales_dues_gt_zero: bool = False,
     limit: int = 5000,
     db: Session = Depends(get_db)
 ):
-    """Retrieves all customers with total sales and current dues, optionally filtered by group or zero sales with dues > 0."""
+    """Retrieves all customers with total sales and current dues, optionally filtered by group."""
     svc = SalesIntelligenceService(db)
-    return svc.list_customers(
-        search=search,
-        group=group,
-        zero_sales_dues_gt_zero=zero_sales_dues_gt_zero,
-        limit=limit
-    )
+    return svc.list_customers(search=search, group=group, limit=limit)
 
 
 @app.get('/sales/customers/{customer_code}/summary', tags=['sales'])

@@ -325,7 +325,6 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                 'sales_percentage': round((b_sales / tot_s * 100.0), 2) if tot_s > 0 else 0.0,
                 'customer_codes': [c['customer_code'] for c in in_b],
             })
-        zero_sales_dues_custs = [c for c in category_customers if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]
         overview_data = {
             'total_customers': tot_c,
             'active_customers': act_c,
@@ -335,9 +334,6 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             'total_payable': round(tot_p, 2),
             'net_receivable': round(tot_d - tot_p, 2),
             'total_orders': sum(c.get('total_orders', 0) for c in category_customers),
-            'zero_sales_dues_count': len(zero_sales_dues_custs),
-            'zero_sales_dues_amount': round(sum(c.get('current_dues', 0.0) for c in zero_sales_dues_custs), 2),
-            'zero_sales_dues_codes': [c['customer_code'] for c in zero_sales_dues_custs],
             'customer_sales_bins': bins_list,
         }
 
@@ -432,147 +428,17 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
     st.markdown("---")
 
-    # SUNDRY DEBTORS Special Intelligence Placeholder & Filter (Enabled ONLY when Category is SUNDRY DEBTORS)
-    is_sundry_debtors = ("SUNDRY DEBTORS" in selected_group.strip().upper())
-    debtor_filter_criterion = "All"
-    zero_sales_dues_list = []
-    active_buyers_list = []
-
-    if is_sundry_debtors:
-        zero_sales_dues_list = [
-            c for c in category_customers
-            if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0
-        ]
-        active_buyers_list = [c for c in category_customers if c.get('total_sales', 0.0) > 0.0]
-        z_count = len(zero_sales_dues_list)
-        z_dues_tot = sum(c.get('current_dues', 0.0) for c in zero_sales_dues_list)
-        z_dues_lakh = z_dues_tot / 100000.0
-        avg_due = (z_dues_tot / z_count) if z_count > 0 else 0.0
-        max_due = max([c.get('current_dues', 0.0) for c in zero_sales_dues_list], default=0.0)
-
-        # Highlighted visual placeholder container for Sundry Debtors
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #FFF1F2 0%, #FFFBEB 100%); border: 1.5px solid #FCA5A5; border-radius: 10px; padding: 14px 18px; margin-top: 10px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <div style="font-size: 1.05rem; font-weight: 700; color: #991B1B;">
-                    🚨 SUNDRY DEBTORS Intelligence: Zero-Sales Parties with Positive Dues
-                </div>
-                <div style="display: flex; gap: 8px;">
-                    <span style="font-size: 0.85rem; font-weight: 700; color: #991B1B; background: #FEE2E2; border: 1px solid #FCA5A5; padding: 3px 10px; border-radius: 6px;">
-                        👥 {z_count} Debtors with ₹0 Sales
-                    </span>
-                    <span style="font-size: 0.85rem; font-weight: 700; color: #B45309; background: #FEF3C7; border: 1px solid #FCD34D; padding: 3px 10px; border-radius: 6px;">
-                        💰 ₹{z_dues_lakh:.2f} Lakhs Dues Locked
-                    </span>
-                </div>
-            </div>
-            <div style="font-size: 0.83rem; color: #475569; margin-top: 4px;">
-                Identified <b>{z_count} registered parties</b> in <b>SUNDRY DEBTORS</b> who have placed <b>no purchase orders (Sales = ₹0)</b> in the uploaded period, yet owe an aggregate <b>₹{z_dues_tot:,.2f}</b> in unrecovered debit dues. Use the filtering criteria below to isolate or view their complete roster.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Dedicated Filtering Criteria Option for SUNDRY DEBTORS
-        debtor_filter_criterion = st.radio(
-            "🎯 Filter SUNDRY DEBTORS Customer List By:",
-            options=[
-                f"All Sundry Debtors ({len(category_customers)} Accounts)",
-                f"🚨 Zero Sales with Dues > ₹0 ONLY ({z_count} Accounts | ₹{z_dues_lakh:.2f}L Dues)",
-                f"🛒 Active Buyers Only ({len(active_buyers_list)} Accounts with Sales > 0)"
-            ],
-            index=0,
-            horizontal=True,
-            key=f"debtor_filter_criterion_{selected_group}"
-        )
-
-        # Expandable Roster / Placeholder Table of parties with sales 0 and dues > 0
-        with st.expander(
-            f"📋 View Roster of Parties with Sales = 0 & Dues > 0 ({z_count} Accounts — ₹{z_dues_lakh:.2f} Lakhs Dues)",
-            expanded=debtor_filter_criterion.startswith("🚨")
-        ):
-            col_rm1, col_rm2, col_rm3, col_rm4 = st.columns(4)
-            with col_rm1:
-                st.metric("Total Dormant Debtors", f"{z_count}")
-            with col_rm2:
-                st.metric("Total Dues Locked", f"₹{z_dues_tot:,.2f}", delta=f"₹{z_dues_lakh:.2f} Lakhs")
-            with col_rm3:
-                st.metric("Average Due per Party", f"₹{avg_due:,.2f}")
-            with col_rm4:
-                st.metric("Highest Single Due", f"₹{max_due:,.2f}")
-
-            df_zero = pd.DataFrame([
-                {
-                    "Party Name": c['customer_name'],
-                    "Customer Code": c['customer_code'],
-                    "Outstanding Dues (Debit ₹)": c['current_dues'],
-                    "Company Payable (Credit ₹)": c['company_payable'],
-                    "Net Due (₹)": c['net_receivable'],
-                    "Oldest Due (Days)": c.get('oldest_due_days', 0),
-                    "Salesperson / Area": f"{c.get('salesperson', 'Unassigned')} ({c.get('district', 'General')})",
-                }
-                for c in sorted(zero_sales_dues_list, key=lambda x: x['current_dues'], reverse=True)
-            ])
-
-            search_roster = st.text_input(
-                "🔍 Search within zero-sales debtors:",
-                placeholder="Type party name or code...",
-                key=f"roster_search_input_{selected_group}"
-            )
-            if search_roster:
-                sq = search_roster.strip().lower()
-                df_zero_filtered = df_zero[
-                    df_zero["Party Name"].str.lower().str.contains(sq, na=False) |
-                    df_zero["Customer Code"].str.lower().str.contains(sq, na=False)
-                ]
-            else:
-                df_zero_filtered = df_zero
-
-            st.dataframe(
-                df_zero_filtered,
-                use_container_width=True,
-                column_config={
-                    "Outstanding Dues (Debit ₹)": st.column_config.NumberColumn(format="₹%,.2f"),
-                    "Company Payable (Credit ₹)": st.column_config.NumberColumn(format="₹%,.2f"),
-                    "Net Due (₹)": st.column_config.NumberColumn(format="₹%,.2f"),
-                    "Oldest Due (Days)": st.column_config.NumberColumn(format="%d days"),
-                },
-                hide_index=True
-            )
-
-            # CSV Download button for collection and sales teams
-            csv_data = df_zero.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Download Dormant Debtors Collection List (.csv)",
-                data=csv_data,
-                file_name=f"{selected_group.lower().replace(' ', '_')}_zero_sales_with_dues.csv",
-                mime="text/csv",
-                key=f"btn_download_zero_sales_dues_{selected_group}"
-            )
-
-        st.markdown("---")
-
     # Section 3: Customer Selector Dropdown
     st.markdown("### 👤 Select Customer for Detailed Intelligence")
 
-    # Determine filtered customer list based on SUNDRY DEBTORS filter criterion
-    if is_sundry_debtors and debtor_filter_criterion.startswith("🚨"):
-        filtered_customers = zero_sales_dues_list
-    elif is_sundry_debtors and debtor_filter_criterion.startswith("🛒"):
-        filtered_customers = active_buyers_list
-    else:
-        filtered_customers = category_customers
-
     # Further filter by selected sales slab if a specific slab is selected
+    filtered_customers = category_customers
     if selected_slab and selected_slab != "All Slabs":
-        if is_sundry_debtors and debtor_filter_criterion.startswith("🚨"):
-            if selected_slab != "0 to 2 Lakh":
-                st.info(f"ℹ️ All zero-sales debtors have ₹0.00 purchases and belong to the '0 to 2 Lakh' slab. Displaying all {len(zero_sales_dues_list)} zero-sales debtors.")
-        else:
-            allowed_codes = bin_label_to_codes.get(selected_slab, set())
-            filtered_customers = [c for c in filtered_customers if c['customer_code'] in allowed_codes]
+        allowed_codes = bin_label_to_codes.get(selected_slab, set())
+        filtered_customers = [c for c in filtered_customers if c['customer_code'] in allowed_codes]
 
     if not filtered_customers:
-        st.warning(f"No customers found matching Category '{selected_group}', Filter '{debtor_filter_criterion}', and Sales Slab '{selected_slab}'.")
+        st.warning(f"No customers found matching Category '{selected_group}' and Sales Slab '{selected_slab}'.")
         return
 
     cust_options = []
@@ -593,24 +459,10 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         cust_options.append(label)
         cust_code_map[label] = code
 
-    # Distinct selectbox key ensuring fresh selection state when switching filter modes
-    filter_key_tag = "zero_dues" if (is_sundry_debtors and debtor_filter_criterion.startswith("🚨")) else ("active" if (is_sundry_debtors and debtor_filter_criterion.startswith("🛒")) else "all")
-    dropdown_title = f"👤 Select Customer ({len(filtered_customers)} accounts"
-    if is_sundry_debtors and debtor_filter_criterion.startswith("🚨"):
-        dropdown_title += f" with Sales = 0 & Dues > 0"
-    elif is_sundry_debtors and debtor_filter_criterion.startswith("🛒"):
-        dropdown_title += f" Active Buyers in {selected_group}"
-    else:
-        dropdown_title += f" in {selected_group}"
-
-    if selected_slab != "All Slabs" and not (is_sundry_debtors and debtor_filter_criterion.startswith("🚨")):
-        dropdown_title += f", Slab: {selected_slab}"
-    dropdown_title += "):"
-
     selected_label = st.selectbox(
-        dropdown_title,
+        f"👤 Select Customer ({len(filtered_customers)} accounts in {selected_group}" + (f", Slab: {selected_slab}" if selected_slab != "All Slabs" else "") + "):",
         options=cust_options,
-        key=f"sales_selected_customer_label_{selected_group}_{filter_key_tag}"
+        key="sales_selected_customer_label"
     )
 
     selected_code = cust_code_map.get(selected_label)
@@ -879,17 +731,11 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             transacted_products.sort(key=lambda x: x['total_amount'], reverse=True)
 
         if not transacted_products and not recent_orders:
-            if current_dues > 0:
-                st.warning(
-                    f"⚠️ **Dormant Customer Account with Dues**: **{cust_name}** has placed no purchase orders in the uploaded Product-Wise Sales Ledger (Sales = ₹0.00), "
-                    f"but currently owes **₹{current_dues:,.2f}** in outstanding debit dues from the Master Customer Ledger."
-                )
-            else:
-                st.info(
-                    "ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: "
-                    "The product list transacted by this customer, quantities, rates, and historical sales transactions "
-                    "will appear here once the **Product-Wise Customer Ledger** (.xlsx/.xls) is ingested using Uploader 2 above."
-                )
+            st.info(
+                "ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: "
+                "The product list transacted by this customer, quantities, rates, and historical sales transactions "
+                "will appear here once the **Product-Wise Customer Ledger** (.xlsx/.xls) is ingested using Uploader 2 above."
+            )
         else:
             tot_units = product_totals.get('total_qty', sum(float(p.get('qty', p.get('total_qty', 0.0)) or 0.0) for p in transacted_products))
             tot_free = product_totals.get('total_free', sum(float(p.get('free', p.get('total_free', 0.0)) or 0.0) for p in transacted_products))
