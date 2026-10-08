@@ -27,7 +27,7 @@ def is_excluded_product(name: str) -> bool:
 
 def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dict):
     # Top Action Bar
-    col_nav1, col_nav2 = st.columns([1, 5])
+    col_nav1, col_nav2, col_nav3 = st.columns([1, 4, 2])
     with col_nav1:
         if st.button("🏠 Back to Dashboard", key="btn_procurement_back_top", use_container_width=True):
             st.session_state["current_page"] = "landing"
@@ -35,6 +35,129 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
     with col_nav2:
         st.markdown('<div class="main-header">💊 MARG Procurement Copilot</div>', unsafe_allow_html=True)
         st.markdown('<div class="sub-header">Upload MARG ERP Excel, generate FEFO-aware procurement recommendations, and correct/approve suggested orders.</div>', unsafe_allow_html=True)
+    with col_nav3:
+        if st.button(
+            "⬇️ Download Ordered Data",
+            key="btn_download_ordered_data",
+            use_container_width=True,
+            type="primary",
+            help="Automatically opens bengalremedies.com, logs in, navigates to Procurement → Order → Initiated, and downloads the full list as Excel."
+        ):
+            st.session_state["show_download_agent_panel"] = True
+
+    # ── Download Ordered Data Agent Panel ──────────────────────────────────────
+    if st.session_state.get("show_download_agent_panel", False):
+        st.markdown("---")
+        with st.container(border=True):
+            col_dl_hdr, col_dl_close = st.columns([8, 1])
+            with col_dl_hdr:
+                st.markdown("### ⬇️ Download Ordered Data — Web Automation Agent")
+                st.markdown(
+                    "This agent will **automatically open a Chrome browser**, log into "
+                    "`http://www.bengalremedies.com:9000`, navigate to **Procurement → Order**, "
+                    "filter by **Status = Initiated**, and download **all paginated rows** as Excel."
+                )
+            with col_dl_close:
+                if st.button("✖ Close", key="btn_close_download_panel"):
+                    st.session_state.pop("show_download_agent_panel", None)
+                    st.session_state.pop("download_agent_result", None)
+                    st.rerun()
+
+            st.markdown("#### ⚙️ Settings")
+            dl_col1, dl_col2 = st.columns([3, 1])
+            with dl_col1:
+                output_dir = st.text_input(
+                    "📁 Save Location (folder on your PC)",
+                    value="/Users/debz/Documents/BR/Project/Ben_Rem/excel_marg/latest",
+                    key="download_agent_output_dir",
+                    help="The downloaded Excel file will be saved here."
+                )
+            with dl_col2:
+                headless_mode = st.checkbox(
+                    "🔇 Run Silently (headless)",
+                    value=False,
+                    key="download_agent_headless",
+                    help="Uncheck to watch the browser automation live. Check to run silently in background."
+                )
+
+            st.info(
+                "📋 **What will happen when you click Run:**\n"
+                "1. A Chrome browser opens (visible by default so you can watch)\n"
+                "2. Logs into `www.bengalremedies.com:9000` with your credentials\n"
+                "3. Navigates: **Procurement → Order → Filter: Initiated**\n"
+                "4. Scrapes all pages of results\n"
+                "5. Saves as **Excel (.xlsx)** to the folder above"
+            )
+
+            run_col, _ = st.columns([2, 5])
+            with run_col:
+                run_clicked = st.button(
+                    "🤖 Run Download Agent Now",
+                    key="btn_run_download_agent",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            if run_clicked:
+                with st.spinner("🤖 Agent running... Browser will open automatically. Please wait — this may take 1–3 minutes depending on data size..."):
+                    try:
+                        resp = requests.post(
+                            f"{BACKEND_URL}/procurement/download-initiated-orders",
+                            params={
+                                "output_dir": output_dir,
+                                "headless": str(headless_mode).lower(),
+                            },
+                            timeout=300,  # 5 minute timeout for full pagination scrape
+                        )
+                        if resp.status_code == 200:
+                            result = resp.json()
+                            st.session_state["download_agent_result"] = result
+                        else:
+                            try:
+                                err = resp.json()
+                            except Exception:
+                                err = {"message": resp.text}
+                            st.session_state["download_agent_result"] = {
+                                "status": "error",
+                                "message": err.get("detail", {}).get("message", str(err)) if isinstance(err.get("detail"), dict) else str(err),
+                                "log": err.get("detail", {}).get("log", []) if isinstance(err.get("detail"), dict) else [],
+                            }
+                    except requests.exceptions.Timeout:
+                        st.session_state["download_agent_result"] = {
+                            "status": "error",
+                            "message": "⏱️ Request timed out. The agent may still be running. Check your save folder for the Excel file.",
+                            "log": [],
+                        }
+                    except Exception as e:
+                        st.session_state["download_agent_result"] = {
+                            "status": "error",
+                            "message": str(e),
+                            "log": [],
+                        }
+                st.rerun()
+
+            # Show result
+            result = st.session_state.get("download_agent_result")
+            if result:
+                if result.get("status") == "success":
+                    st.success(
+                        f"✅ **Download Complete!**\n\n"
+                        f"- **Rows Downloaded**: {result.get('rows_downloaded', 0):,}\n"
+                        f"- **Saved To**: `{result.get('file_path', 'N/A')}`"
+                    )
+                else:
+                    st.error(f"❌ **Agent Error**: {result.get('message', 'Unknown error')}")
+
+                # Show progress log in expander
+                log_lines = result.get("log", [])
+                if log_lines:
+                    with st.expander("📋 View Agent Progress Log", expanded=False):
+                        for line in log_lines:
+                            st.text(line)
+
+        st.markdown("---")
+
+
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("""

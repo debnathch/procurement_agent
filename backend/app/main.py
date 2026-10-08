@@ -846,4 +846,58 @@ def seed_demo_sales_data(db: Session = Depends(get_db)):
     }
 
 
+# ---------------------------------------------------------------------------
+# Download Orders Agent — Web Automation via Playwright
+# ---------------------------------------------------------------------------
+@app.post('/procurement/download-initiated-orders', tags=['procurement'])
+async def download_initiated_orders(
+    output_dir: str = "/Users/debz/Documents/BR/Project/Ben_Rem/excel_marg/latest",
+    headless: bool = False,
+):
+    """
+    Triggers the Playwright-based web automation agent to:
+      1. Open http://www.bengalremedies.com:9000
+      2. Login with configured credentials
+      3. Navigate: Procurement → Order
+      4. Filter by Status = Initiated
+      5. Scrape ALL paginated table rows
+      6. Save as Excel (.xlsx) to output_dir
+
+    Returns a JSON result with file_path, rows_downloaded, and progress log.
+    """
+    import asyncio
+    try:
+        from backend.app.agents.download_orders_agent import run_download_agent
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Agent import error: {e}")
+
+    try:
+        result = await run_download_agent(
+            output_dir=output_dir,
+            headless=headless,
+            status_filter="initiated",
+        )
+        if result["success"]:
+            return {
+                "status": "success",
+                "file_path": result["file_path"],
+                "rows_downloaded": result["rows_downloaded"],
+                "message": result["message"],
+                "log": result["log"],
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": result["message"],
+                    "log": result["log"],
+                }
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 
