@@ -364,13 +364,14 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             )
         with col_k3:
             inact_cnt = overview_data.get('inactive_customers', tot_cnt - act_cnt)
-            inact_pct = (inact_cnt / tot_cnt * 100.0) if tot_cnt > 0 else 0.0
+            na_dues_cnt = overview_data.get('non_active_with_dues', len([c for c in category_customers if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]))
+            na_zero_cnt = overview_data.get('non_active_zero_dues', inact_cnt - na_dues_cnt)
             st.metric(
                 "💤 Non-Active Buyers",
                 f"{inact_cnt:,}",
-                delta=f"{inact_pct:.1f}% (₹0 Sales)",
-                delta_color="inverse",
-                help="Debtors with zero purchase transactions (Total Sales = ₹0) in the uploaded sales ledger."
+                delta=f"{na_dues_cnt} with Dues | {na_zero_cnt} 0 Dues",
+                delta_color="off",
+                help=f"Non-Active Debtors (0 Sales): {na_dues_cnt} owe >0 dues; {na_zero_cnt} have 0 dues (settled)."
             )
         with col_k4:
             tot_sales_val = overview_data['total_sales']
@@ -483,37 +484,48 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
     # Section 3: Customer Selector Dropdown
     st.markdown("### 👤 Select Customer for Detailed Intelligence")
 
-    # Filter by Buyer Activity (Enabled ONLY when Category is SUNDRY DEBTORS)
+    # Filter by Buyer Activity & Dues (Enabled ONLY when Category is SUNDRY DEBTORS)
     buyer_activity_filter = "All Debtors"
     if is_sundry_debtors:
         tot_c = overview_data['total_customers']
         act_c = overview_data['active_customers']
-        inact_c = overview_data.get('inactive_customers', tot_c - act_c)
+        na_with_dues = [c for c in category_customers if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]
+        na_zero_dues = [c for c in category_customers if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) == 0.0]
+        na_with_dues_cnt = len(na_with_dues)
+        na_zero_dues_cnt = len(na_zero_dues)
 
         buyer_activity_filter = st.segmented_control(
-            "🎯 Filter SUNDRY DEBTORS by Buyer Activity:",
+            "🎯 Filter SUNDRY DEBTORS by Buyer Activity & Dues:",
             options=[
                 f"All Debtors ({tot_c})",
                 f"🛒 Active Buyers ({act_c})",
-                f"💤 Non-Active Buyers ({inact_c})"
+                f"⚠️ Non-Active (>0 Dues) ({na_with_dues_cnt})",
+                f"💤 Non-Active (0 Dues) ({na_zero_dues_cnt})"
             ],
             default=f"All Debtors ({tot_c})",
             key=f"sales_buyer_activity_filter_{selected_group}"
         )
 
     # Determine filtered customer list based on SUNDRY DEBTORS buyer activity filter
-    if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
-        filtered_customers = [c for c in category_customers if c.get('total_sales', 0.0) == 0.0]
+    if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("⚠️"):
+        # Kind 1: Non-Active with >0 Dues
+        filtered_customers = [c for c in category_customers if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]
+    elif is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
+        # Kind 2: Non-Active with 0 Dues
+        filtered_customers = [c for c in category_customers if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) == 0.0]
     elif is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("🛒"):
         filtered_customers = [c for c in category_customers if c.get('total_sales', 0.0) > 0.0]
     else:
         filtered_customers = category_customers
 
     # Further filter by selected sales slab if a specific slab is selected
+    is_non_active_mode = is_sundry_debtors and buyer_activity_filter and (
+        buyer_activity_filter.startswith("⚠️") or buyer_activity_filter.startswith("💤")
+    )
     if selected_slab and selected_slab != "All Slabs":
-        if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
+        if is_non_active_mode:
             if selected_slab != "0 to 2 Lakh":
-                st.info(f"ℹ️ Non-Active Buyers have ₹0.00 purchases and belong to the '0 to 2 Lakh' sales slab. Displaying all {len(filtered_customers)} Non-Active Buyers.")
+                st.info(f"ℹ️ Non-Active Buyers have ₹0.00 purchases and belong to the '0 to 2 Lakh' sales slab. Displaying all {len(filtered_customers)} matching Non-Active Buyers.")
         else:
             allowed_codes = bin_label_to_codes.get(selected_slab, set())
             filtered_customers = [c for c in filtered_customers if c['customer_code'] in allowed_codes]
@@ -537,21 +549,28 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         label = f"{name} [{grp}] | Dues (Debit): ₹{dues:,.2f} | Liable to Pay (Credit): ₹{cr:,.2f}"
         if tot_s > 0:
             label += f" | Sales: ₹{tot_s:,.2f}"
+        elif dues > 0:
+            label += " | Non-Active (>0 Dues, Sales: ₹0.00)"
         else:
-            label += " | Non-Active (Sales: ₹0.00)"
+            label += " | Non-Active (0 Dues & 0 Sales)"
         cust_options.append(label)
         cust_code_map[label] = code
 
-    filter_tag = "non_active" if (is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤")) else ("active" if (is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("🛒")) else "all")
-    dropdown_title = f"👤 Select Customer ({len(filtered_customers)} accounts"
-    if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
-        dropdown_title += f" Non-Active Buyers in {selected_group}"
+    if is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("⚠️"):
+        filter_tag = "na_with_dues"
+        filter_desc = f" Non-Active (>0 Dues) in {selected_group}"
+    elif is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤"):
+        filter_tag = "na_zero_dues"
+        filter_desc = f" Non-Active (0 Dues) in {selected_group}"
     elif is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("🛒"):
-        dropdown_title += f" Active Buyers in {selected_group}"
+        filter_tag = "active"
+        filter_desc = f" Active Buyers in {selected_group}"
     else:
-        dropdown_title += f" in {selected_group}"
+        filter_tag = "all"
+        filter_desc = f" in {selected_group}"
 
-    if selected_slab != "All Slabs" and not (is_sundry_debtors and buyer_activity_filter and buyer_activity_filter.startswith("💤")):
+    dropdown_title = f"👤 Select Customer ({len(filtered_customers)} accounts{filter_desc}"
+    if selected_slab != "All Slabs" and not is_non_active_mode:
         dropdown_title += f", Slab: {selected_slab}"
     dropdown_title += "):"
 
@@ -591,8 +610,12 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
     status_badge_html = ""
     if is_sundry_debtors:
+        cust_dues_check = summary.get('current_dues', summary.get('current_outstanding', 0.0))
         if tot_sales_check == 0:
-            status_badge_html = ' &nbsp;|&nbsp; <b>Status:</b> <span style="background-color: #FEE2E2; color: #991B1B; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">💤 Non-Active Buyer (₹0 Sales)</span>'
+            if cust_dues_check > 0:
+                status_badge_html = f' &nbsp;|&nbsp; <b>Status:</b> <span style="background-color: #FEF3C7; color: #92400E; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">⚠️ Non-Active (>0 Dues: ₹{cust_dues_check:,.2f})</span>'
+            else:
+                status_badge_html = ' &nbsp;|&nbsp; <b>Status:</b> <span style="background-color: #F1F5F9; color: #475569; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">💤 Non-Active (0 Dues & 0 Sales)</span>'
         else:
             status_badge_html = ' &nbsp;|&nbsp; <b>Status:</b> <span style="background-color: #DCFCE7; color: #166534; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">🛒 Active Buyer</span>'
 
@@ -671,7 +694,13 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
         st.metric("Total Orders / Invoices", total_orders, help=f"Last Order Date: {last_order_dt} ({days_since_order} days ago)")
 
     if total_orders == 0 and tot_sales == 0.0:
-        st.info("ℹ️ **Product-Wise Customer Ledger Pending**: Sales figures, order volume, and transaction history will be populated when this customer's product-wise sales ledger (Uploader 2 above) is uploaded.")
+        if is_sundry_debtors:
+            if current_dues > 0:
+                st.warning(f"⚠️ **Non-Active Buyer (>0 Dues)**: Zero purchase orders recorded. Outstanding dues of **₹{current_dues:,.2f}** are pending collection.")
+            else:
+                st.info("💤 **Non-Active Buyer (0 Sales & 0 Dues)**: Zero purchase orders recorded and zero outstanding dues. Account is settled/inactive.")
+        else:
+            st.info("ℹ️ **Product-Wise Customer Ledger Pending**: Sales figures, order volume, and transaction history will be populated when this customer's product-wise sales ledger (Uploader 2 above) is uploaded.")
 
     st.markdown("---")
 
@@ -836,10 +865,16 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
 
         if not transacted_products and not recent_orders:
             if is_sundry_debtors and tot_sales == 0:
-                st.info(
-                    f"ℹ️ **Non-Active Buyer**: **{cust_name}** has placed no product purchase orders (Sales = ₹0.00) in the uploaded Product-Wise Customer Ledger."
-                    + (f" Outstanding debit balance is **₹{current_dues:,.2f}** from the Master Customer Ledger." if current_dues > 0 else "")
-                )
+                if current_dues > 0:
+                    st.warning(
+                        f"⚠️ **Non-Active Buyer (>0 Dues)**: **{cust_name}** has placed no product purchase orders (Sales = ₹0.00) in the uploaded sales period, "
+                        f"but has an outstanding debit balance of **₹{current_dues:,.2f}** pending collection."
+                    )
+                else:
+                    st.info(
+                        f"💤 **Non-Active Buyer (0 Sales & 0 Dues)**: **{cust_name}** has placed no product purchase orders (Sales = ₹0.00) "
+                        f"and has zero outstanding dues (Dues = ₹0.00). Account is clear/inactive."
+                    )
             else:
                 st.info(
                     "ℹ️ **No Product-Wise Customer Ledger Uploaded Yet**: "

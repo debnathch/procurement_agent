@@ -209,10 +209,19 @@ class SalesIntelligenceService:
                 'customer_codes': [c['customer_code'] for c in in_bin],
             })
 
+        # Sub-categorization of Non-Active Buyers (0 sales):
+        # Kind 1: 0 sales & >0 dues
+        # Kind 2: 0 sales & 0 dues
+        non_active_with_dues = [c for c in custs if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]
+        non_active_zero_dues = [c for c in custs if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) == 0.0]
+
         return {
             'total_customers': tot_customers,
             'active_customers': active_customers,
             'inactive_customers': tot_customers - active_customers,
+            'non_active_with_dues': len(non_active_with_dues),
+            'non_active_with_dues_amount': round(sum(c.get('current_dues', 0.0) for c in non_active_with_dues), 2),
+            'non_active_zero_dues': len(non_active_zero_dues),
             'total_sales': round(tot_sales, 2),
             'total_dues': round(tot_dues, 2),
             'total_payable': round(tot_payable, 2),

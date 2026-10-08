@@ -1324,4 +1324,53 @@ def test_sales_dashboard_overview_group_filtering():
     session.close()
 
 
+def test_sales_dashboard_overview_non_active_buyers_with_dues_and_zero_dues():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    # Create 3 debtors:
+    # 1. Active: sales > 0, dues > 0
+    # 2. Non-Active with >0 Dues: sales == 0, dues > 0
+    # 3. Non-Active with 0 Dues: sales == 0, dues == 0
+    c1 = Customer(customer_code='CUST-A1', customer_name='ACTIVE PHARMA', group_name='SUNDRY DEBTORS', district='Kolkata', status='ACTIVE')
+    c2 = Customer(customer_code='CUST-NA1', customer_name='DORMANT DEBTOR', group_name='SUNDRY DEBTORS', district='Kolkata', status='ACTIVE')
+    c3 = Customer(customer_code='CUST-NA2', customer_name='SETTLED DEBTOR', group_name='SUNDRY DEBTORS', district='Kolkata', status='ACTIVE')
+    session.add_all([c1, c2, c3])
+
+    # Invoices / Ledger Dues
+    session.add(CustomerReceivable(customer_code='CUST-A1', invoice_no='INV-01', outstanding_amount=5000.0, days_due=10))
+    session.add(CustomerReceivable(customer_code='CUST-NA1', invoice_no='INV-02', outstanding_amount=15000.0, days_due=60))
+    # CUST-NA2 has no outstanding invoice (dues = 0.0)
+
+    # Sales transactions only for CUST-A1
+    session.add(SalesHistory(
+        product_code='MED-001',
+        product_name='AZITHROMYCIN 500',
+        sale_date=datetime.utcnow(),
+        qty_sold=10.0,
+        rate=100.0,
+        amount=1000.0,
+        customer_code='CUST-A1',
+        customer_name='ACTIVE PHARMA'
+    ))
+    session.commit()
+
+    sales_svc = SalesIntelligenceService(session)
+    overview = sales_svc.get_sales_dashboard_overview(group='SUNDRY DEBTORS')
+
+    assert overview['total_customers'] == 3
+    assert overview['active_customers'] == 1
+    assert overview['inactive_customers'] == 2
+    assert overview['non_active_with_dues'] == 1
+    assert overview['non_active_with_dues_amount'] == 15000.0
+    assert overview['non_active_zero_dues'] == 1
+    assert overview['total_sales'] == 1000.0
+    assert overview['total_dues'] == 20000.0
+
+    session.close()
+
+
+
 
