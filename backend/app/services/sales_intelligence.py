@@ -35,9 +35,16 @@ class SalesIntelligenceService:
         groups = [g for g in self.db.scalars(stmt).all() if g and str(g).strip()]
         return sorted(list(set(groups)))
 
-    def list_customers(self, search: Optional[str] = None, group: Optional[str] = None, limit: int = 5000) -> list[dict[str, Any]]:
+    def list_customers(
+        self,
+        search: Optional[str] = None,
+        group: Optional[str] = None,
+        zero_sales_dues_gt_zero: bool = False,
+        limit: int = 5000
+    ) -> list[dict[str, Any]]:
         """
         Retrieves all customers with aggregated total sales and current dues.
+        If zero_sales_dues_gt_zero is True, filters to parties with total_sales == 0 and current_dues > 0.
         If no Customer records exist yet, synthesizes customer list from sales_history.
         """
         now = datetime.utcnow()
@@ -106,6 +113,8 @@ class SalesIntelligenceService:
                     'last_order_date': s_max_dt.strftime('%d-%b-%Y') if s_max_dt else 'No Orders',
                     'oldest_due_days': d_max_days,
                 })
+            if zero_sales_dues_gt_zero:
+                results = [c for c in results if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]
             return results
 
         # Fallback: synthesize customer records from sales_history if customers table is empty
@@ -144,6 +153,8 @@ class SalesIntelligenceService:
                 'last_order_date': max_dt.strftime('%d-%b-%Y') if max_dt else 'No Orders',
                 'oldest_due_days': 0,
             })
+        if zero_sales_dues_gt_zero:
+            results = [c for c in results if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]
         return sorted(results, key=lambda x: x['customer_name'].upper())
 
     def get_sales_dashboard_overview(self, group: Optional[str] = None) -> dict[str, Any]:
@@ -156,6 +167,9 @@ class SalesIntelligenceService:
         - total_payable (Credit liabilities from Master Ledger)
         - net_receivable
         - total_orders
+        - zero_sales_dues_count: customers with total_sales == 0 and current_dues > 0
+        - zero_sales_dues_amount: aggregate outstanding dues for zero-sales customers
+        - zero_sales_dues_codes: list of customer codes with zero sales and dues > 0
         - customer_sales_bins:
             - '0 to 2 Lakh': 0 <= sales <= 200,000
             - '>2 to 5 Lakh': 200,000 < sales <= 500,000
@@ -171,6 +185,11 @@ class SalesIntelligenceService:
         tot_payable = sum(c.get('company_payable', c.get('credit_amount', 0.0)) for c in custs)
         tot_orders = sum(c.get('total_orders', 0) for c in custs)
         active_customers = sum(1 for c in custs if c.get('total_sales', 0.0) > 0)
+
+        # Zero sales with dues > 0 analysis
+        zero_sales_dues_custs = [c for c in custs if c.get('total_sales', 0.0) == 0.0 and c.get('current_dues', 0.0) > 0.0]
+        zero_sales_dues_count = len(zero_sales_dues_custs)
+        zero_sales_dues_amount = sum(c.get('current_dues', 0.0) for c in zero_sales_dues_custs)
 
         bin_specs = [
             {'bin_id': '0_to_2L', 'bin_label': '0 to 2 Lakh', 'min_val': 0.0, 'max_val': 200000.0},
@@ -218,6 +237,9 @@ class SalesIntelligenceService:
             'total_payable': round(tot_payable, 2),
             'net_receivable': round(tot_dues - tot_payable, 2),
             'total_orders': tot_orders,
+            'zero_sales_dues_count': zero_sales_dues_count,
+            'zero_sales_dues_amount': round(zero_sales_dues_amount, 2),
+            'zero_sales_dues_codes': [c['customer_code'] for c in zero_sales_dues_custs],
             'customer_sales_bins': bins_result,
         }
 

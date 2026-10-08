@@ -1324,4 +1324,112 @@ def test_sales_dashboard_overview_group_filtering():
     session.close()
 
 
+def test_list_customers_zero_sales_dues_gt_zero():
+    """
+    Validates that:
+    1. list_customers(zero_sales_dues_gt_zero=True) returns strictly parties where total_sales == 0 and current_dues > 0.
+    2. get_sales_dashboard_overview returns accurate zero_sales_dues_count and zero_sales_dues_amount.
+    """
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    # Setup parties in SUNDRY DEBTORS
+    # Party 1: Sales = 0, Dues = 35,000 (Dormant debtor with dues) -> SHOULD MATCH
+    session.add(Customer(
+        customer_code='CUST-ZERO1',
+        customer_name='ALAM MEDICAL AGENCY',
+        group_name='SUNDRY DEBTORS',
+        district='Palashi',
+        status='ACTIVE'
+    ))
+    session.add(CustomerReceivable(
+        customer_code='CUST-ZERO1',
+        customer_name='ALAM MEDICAL AGENCY',
+        invoice_no='INV-001',
+        outstanding_amount=35000.0,
+        adjusted_amount=0.0,
+        days_due=45
+    ))
+
+    # Party 2: Sales = 50,000, Dues = 10,000 (Active debtor with dues) -> SHOULD NOT MATCH (has sales)
+    session.add(Customer(
+        customer_code='CUST-ACT1',
+        customer_name='ACTIVE PHARMA',
+        group_name='SUNDRY DEBTORS',
+        district='Kolkata',
+        status='ACTIVE'
+    ))
+    session.add(CustomerReceivable(
+        customer_code='CUST-ACT1',
+        customer_name='ACTIVE PHARMA',
+        invoice_no='INV-002',
+        outstanding_amount=10000.0,
+        adjusted_amount=0.0,
+        days_due=10
+    ))
+    session.add(SalesHistory(
+        product_code='MED-001',
+        product_name='PARACETAMOL 650',
+        sale_date=datetime.utcnow(),
+        qty_sold=50.0,
+        rate=1000.0,
+        amount=50000.0,
+        customer_code='CUST-ACT1',
+        customer_name='ACTIVE PHARMA'
+    ))
+
+    # Party 3: Sales = 0, Dues = 0 (Dormant with NO dues) -> SHOULD NOT MATCH (dues is 0)
+    session.add(Customer(
+        customer_code='CUST-CLEAN',
+        customer_name='CLEAN PHARMA',
+        group_name='SUNDRY DEBTORS',
+        district='Howrah',
+        status='ACTIVE'
+    ))
+
+    # Party 4: Sales = 0, Dues = 20,000 in SUNDRY CREDITORS -> DIFFERENT GROUP
+    session.add(Customer(
+        customer_code='CUST-CRED1',
+        customer_name='SUPPLIER CREDITOR',
+        group_name='SUNDRY CREDITORS',
+        district='Kolkata',
+        status='ACTIVE'
+    ))
+    session.add(CustomerReceivable(
+        customer_code='CUST-CRED1',
+        customer_name='SUPPLIER CREDITOR',
+        invoice_no='INV-003',
+        outstanding_amount=20000.0,
+        adjusted_amount=0.0,
+        days_due=30
+    ))
+
+    session.commit()
+    sales_svc = SalesIntelligenceService(session)
+
+    # 1. Test list_customers with zero_sales_dues_gt_zero=True for SUNDRY DEBTORS
+    zero_debtors = sales_svc.list_customers(group='SUNDRY DEBTORS', zero_sales_dues_gt_zero=True)
+    assert len(zero_debtors) == 1
+    assert zero_debtors[0]['customer_code'] == 'CUST-ZERO1'
+    assert zero_debtors[0]['customer_name'] == 'ALAM MEDICAL AGENCY'
+    assert zero_debtors[0]['total_sales'] == 0.0
+    assert zero_debtors[0]['current_dues'] == 35000.0
+
+    # 2. Test list_customers without zero_sales_dues_gt_zero for SUNDRY DEBTORS (should return all 3)
+    all_debtors = sales_svc.list_customers(group='SUNDRY DEBTORS', zero_sales_dues_gt_zero=False)
+    assert len(all_debtors) == 3
+
+    # 3. Test get_sales_dashboard_overview for SUNDRY DEBTORS
+    overview = sales_svc.get_sales_dashboard_overview(group='SUNDRY DEBTORS')
+    assert overview['total_customers'] == 3
+    assert overview['active_customers'] == 1
+    assert overview['zero_sales_dues_count'] == 1
+    assert overview['zero_sales_dues_amount'] == 35000.0
+    assert 'CUST-ZERO1' in overview['zero_sales_dues_codes']
+
+    session.close()
+
+
+
 
