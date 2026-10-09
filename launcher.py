@@ -24,7 +24,8 @@ else:
 
 BACKEND_HOST = os.environ.get("BACKEND_HOST", "127.0.0.1")
 BACKEND_PORT = int(os.environ.get("BACKEND_PORT", "8000"))
-FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "8501"))
+# Use $PORT from Render / Cloud Run / Heroku if provided, default to 8501
+FRONTEND_PORT = int(os.environ.get("PORT", os.environ.get("FRONTEND_PORT", "8501")))
 
 
 def wait_for_backend(url: str, timeout: int = 15) -> bool:
@@ -79,6 +80,8 @@ def run_frontend_service():
         "run",
         str(frontend_script),
         "--global.developmentMode=false",
+        "--server.address",
+        "0.0.0.0",
         "--server.port",
         str(FRONTEND_PORT),
         "--server.headless",
@@ -128,18 +131,22 @@ def supervisor():
     print(f"[*] Starting Streamlit UI on http://localhost:{FRONTEND_PORT} ...", flush=True)
     frontend_proc = subprocess.Popen(frontend_cmd, env=env)
 
-    # Automatically open browser (skip in Docker / headless environments)
-    is_docker = os.environ.get("DOCKER_RUNTIME", "").strip() == "1"
-    if not is_docker:
+    # Automatically open browser (skip in Docker / Render / cloud headless environments)
+    is_headless = (
+        os.environ.get("DOCKER_RUNTIME", "").strip() == "1"
+        or "RENDER" in os.environ
+        or "PORT" in os.environ
+    )
+    if not is_headless:
         try:
             time.sleep(1.5)
             webbrowser.open(f"http://localhost:{FRONTEND_PORT}")
         except Exception:
             pass
     else:
-        print(f"[+] Running in Docker — open your browser manually:")
-        print(f"    UI  → http://localhost:{FRONTEND_PORT}")
-        print(f"    API → http://localhost:{BACKEND_PORT}/docs")
+        print("[+] Running in cloud / headless container:")
+        print(f"    UI Port  → {FRONTEND_PORT}")
+        print(f"    API Port → {BACKEND_PORT}")
 
     def shutdown(signum, frame):
         print("\n[*] Shutting down Procurement Agent services...")
