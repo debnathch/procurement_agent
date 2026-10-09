@@ -634,3 +634,186 @@ class IngestionService:
 
         return stats
 
+    def ingest_ordered_items_excel(self, file_content: bytes, filename: str) -> dict[str, Any]:
+        """
+        Ingests an Excel or CSV file containing already-ordered / pipeline items (Stock On Order).
+
+        Guardrail:
+        - If the Product table in the database is empty, immediately stops ingestion and raises:
+          "Please upload the stock and sales report first."
+
+        Processing:
+        1. Reads Excel / CSV content.
+        2. Identifies product name, order quantity, and composition columns.
+        3. Uses PharmaProductMatcher to normalize pharma names and match to catalog products.
+        4. Updates InventoryBatch.qty_on_order for each matched product (clearing previous on-order quantities first).
+        5. Synchronizes ProcurementProposal.stock_on_order if proposals exist.
+        6. Returns structured ingestion stats and lists of matched/unmatched items.
+        """
+        import io
+        import pandas as pd
+        from datetime import datetime
+        from backend.app.services.pharma_matcher import PharmaProductMatcher
+
+        # Guardrail: Must have catalog products already in database
+        prod_count = self.db.scalar(select(func.count(Product.id))) or 0
+        if prod_count == 0:
+            raise ValueError("Please upload the stock and sales report first.")
+
+        # Read file into DataFrame
+        try:
+            if filename.lower().endswith('.csv'):
+                df = pd.read_csv(io.BytesIO(file_content))
+            else:
+                df = pd.read_excel(io.BytesIO(file_content))
+        except Exception as e:
+            raise ValueError(f"Could not read uploaded Excel/CSV file: {e}")
+
+        if df.empty:
+            raise ValueError("The uploaded file contains no data rows.")
+
+        # Identify key columns flexibly
+        cols = {str(c).strip().lower(): c for c in df.columns}
+
+        name_col = None
+        for cand in ['product name', 'product', 'item name', 'item', 'product_name', 'description']:
+            if cand in cols:
+                name_col = cols[cand]
+                break
+        if not name_col:
+            name_col = df.columns[0]
+
+        qty_col = None
+        for cand in ['order qty', 'order quantity', 'ordered qty', 'qty', 'quantity', 'pending qty', 'po qty', 'qty_on_order']:
+            if cand in cols:
+                qty_col = cols[cand]
+                break
+        if not qty_col:
+            for c_low, orig_col in cols.items():
+                if 'qty' in c_low or 'quantity' in c_low or 'order' in c_low:
+                    qty_col = orig_col
+                    break
+
+        comp_col = None
+        for cand in ['composition', 'salt', 'formula', 'generic name', 'generic']:
+            if cand in cols:
+                comp_col = cols[cand]
+                break
+
+        status_col = None
+        for cand in ['status', 'order status']:
+            if cand in cols:
+                status_col = cols[cand]
+                break
+
+        # Load all products from DB for pharma matching
+        all_prods = self.db.scalars(select(Product)).all()
+        matcher = PharmaProductMatcher(all_prods)
+
+        # Clear previous pipeline quantities on batches to prevent double-counting on re-upload
+        self.db.execute(update(InventoryBatch).values(qty_on_order=0.0))
+
+        # Aggregate ordered quantities by matched product code
+        ordered_by_code: dict[str, float] = {}
+        matched_details: list[dict] = []
+        unmatched_details: list[dict] = []
+
+        for idx, row in df.iterrows():
+            raw_name = str(row.get(name_col, '') or '').strip()
+            if not raw_name or raw_name.lower() in ('nan', 'none', 'total', 'grand total'):
+                continue
+
+            # Parse quantity
+            raw_qty = row.get(qty_col, 0) if qty_col else 0
+            try:
+                qty = float(pd.to_numeric(raw_qty, errors='coerce') or 0.0)
+            except Exception:
+                qty = 0.0
+
+            # Check status if column exists (skip explicitly cancelled orders)
+            if status_col:
+                st_val = str(row.get(status_col, '') or '').strip().lower()
+                if 'cancel' in st_val or 'reject' in st_val:
+                    continue
+
+            comp_val = str(row.get(comp_col, '') or '').strip() if comp_col else ""
+
+            matched_prod, method, score = matcher.match(raw_name, comp_val)
+
+            if matched_prod:
+                p_code = matched_prod.product_code
+                ordered_by_code[p_code] = ordered_by_code.get(p_code, 0.0) + qty
+                matched_details.append({
+                    'ordered_name': raw_name,
+                    'matched_code': p_code,
+                    'matched_name': matched_prod.product_name,
+                    'order_qty': qty,
+                    'method': method,
+                    'confidence': score,
+                })
+            else:
+                unmatched_details.append({
+                    'ordered_name': raw_name,
+                    'order_qty': qty,
+                    'composition': comp_val,
+                })
+
+        # Update InventoryBatch with the on-order quantities
+        for p_code, tot_qty in ordered_by_code.items():
+            batches = self.db.scalars(
+                select(InventoryBatch).where(InventoryBatch.product_code == p_code)
+            ).all()
+
+            if batches:
+                primary_batch = max(batches, key=lambda b: getattr(b, 'expiry_date', None) or datetime.min)
+                primary_batch.qty_on_order = tot_qty
+            else:
+                new_batch = InventoryBatch(
+                    product_code=p_code,
+                    batch_no='ON_ORDER',
+                    qty_on_hand=0.0,
+                    qty_on_order=tot_qty,
+                    is_promo_material=False,
+                )
+                self.db.add(new_batch)
+
+        # Synchronize proposals if any exist in the database
+        for p_code, tot_qty in ordered_by_code.items():
+            self.db.execute(
+                update(ProcurementProposal)
+                .where(ProcurementProposal.product_code == p_code)
+                .values(stock_on_order=tot_qty)
+            )
+
+        self.db.commit()
+
+        total_units = sum(ordered_by_code.values())
+        stats = {
+            'total_rows_processed': len(df),
+            'matched_count': len(matched_details),
+            'unmatched_count': len(unmatched_details),
+            'unique_products_updated': len(ordered_by_code),
+            'total_units_on_order': round(total_units, 2),
+            'matched_items': matched_details,
+            'unmatched_items': unmatched_details,
+        }
+
+        audit(
+            self.db,
+            event_type='ORDERED_ITEMS_INGESTED',
+            actor='user-upload',
+            entity_type='file',
+            entity_id=filename,
+            details={
+                'total_rows': stats['total_rows_processed'],
+                'matched': stats['matched_count'],
+                'unmatched': stats['unmatched_count'],
+                'total_units': stats['total_units_on_order'],
+                'products_updated': stats['unique_products_updated'],
+            },
+        )
+        self.db.commit()
+
+        return stats
+
+

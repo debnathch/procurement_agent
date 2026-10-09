@@ -895,8 +895,41 @@ async def download_initiated_orders(
             )
     except HTTPException:
         raise
+@app.post('/procurement/upload-ordered-items', tags=['procurement'])
+async def upload_ordered_items(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Ingests an Excel or CSV file containing already-ordered items (Pipeline / Stock on Order).
+
+    Guardrail:
+    - If the catalog products table is empty, returns HTTP 400:
+      "Please upload the stock and sales report first."
+    """
+    filename = file.filename or "ordered_items.xlsx"
+    ext = Path(filename).suffix.lower()
+    if ext not in ('.xlsx', '.xls', '.csv'):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Please upload an Excel (.xlsx, .xls) or CSV file."
+        )
+
+    content = await file.read()
+    ingestion_service = IngestionService(db)
+
+    try:
+        stats = ingestion_service.ingest_ordered_items_excel(content, filename)
+        return {
+            "status": "success",
+            "message": f"Successfully ingested {stats['total_rows_processed']} ordered items. Updated pipeline stock for {stats['unique_products_updated']} products ({stats['total_units_on_order']} units on order).",
+            "stats": stats,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to ingest ordered items: {e}")
+
 
 
 

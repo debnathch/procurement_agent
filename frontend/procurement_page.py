@@ -406,8 +406,105 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                                 st.session_state["last_upload_success_files"] = success_files
                                 st.session_state["upload_banner"] = f"🎉 Ingestion & Analysis Complete! Processed {success_files} file(s). Top KPI metrics & order suggestions are now updated and synchronized with the DB."
                                 st.rerun()
-    
-    
+
+        # -----------------------------------------------------------------------
+        # Section 2: Upload Already Ordered Items (Pipeline / Stock On Order)
+        # -----------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("2. Upload Already Ordered Items (Pipeline / Stock On Order)")
+        st.markdown("""
+        Upload your initiated / active purchase orders (`.xlsx`, `.xls`, or `.csv`) to populate **Stock Already On Order (Pipeline)**.
+        - **Pro-Pharmacist NLP Normalization**: Matches brands, strengths, volumes, and active salts to your existing catalog.
+        - **Pipeline Stock Sync**: Deducts on-order units from deficit (`Net Need = Target Stock - Usable Stock - Stock On Order`).
+        - **Safety Guardrail**: Requires catalog stock report to be loaded first.
+        """)
+
+        col_ord1, col_ord2 = st.columns([2, 1])
+        with col_ord1:
+            ordered_file = st.file_uploader(
+                "Select Already Ordered Items Excel/CSV (.xlsx, .xls, .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="ordered_items_file_uploader",
+                help="Upload order report containing Product Name and Order Qty (e.g. Initiated orders downloaded from Bengal Remedies portal)"
+            )
+
+            if ordered_file:
+                st.info(f"📄 Loaded file: **{ordered_file.name}** ({ordered_file.size / 1024:.1f} KB)")
+                try:
+                    if ordered_file.name.lower().endswith('.csv'):
+                        df_ord_prev = pd.read_csv(ordered_file, nrows=5)
+                    else:
+                        df_ord_prev = pd.read_excel(ordered_file, nrows=5)
+                    with st.expander("👀 Preview Uploaded Orders (First 5 Rows)", expanded=False):
+                        st.dataframe(df_ord_prev, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Preview warning: {e}")
+
+                if st.button("📥 Ingest Ordered Items & Update Pipeline Stock", type="primary", key="btn_ingest_ordered_items", use_container_width=True):
+                    with st.spinner("Analyzing pharmaceutical product names with NLP matcher & updating pipeline stock..."):
+                        try:
+                            upload_files = {'file': (ordered_file.name, ordered_file.getvalue(), ordered_file.type or 'application/octet-stream')}
+                            resp = requests.post(f"{BACKEND_URL}/procurement/upload-ordered-items", files=upload_files, timeout=60)
+                            if resp.status_code == 200:
+                                res_data = resp.json()
+                                st.session_state["ordered_items_upload_result"] = res_data
+                                st.session_state["upload_banner"] = f"✅ Successfully updated pipeline orders! {res_data.get('stats', {}).get('unique_products_updated', 0)} products updated ({res_data.get('stats', {}).get('total_units_on_order', 0):,.0f} units on order)."
+                                st.rerun()
+                            else:
+                                err_detail = resp.json().get('detail', resp.text) if resp.headers.get('content-type', '').startswith('application/json') else resp.text
+                                st.session_state["ordered_items_upload_result"] = {
+                                    "status": "error",
+                                    "message": err_detail,
+                                }
+                                st.rerun()
+                        except Exception as ex:
+                            st.error(f"Error communicating with backend: {ex}")
+
+        with col_ord2:
+            st.info("💡 **Quick Load from Web Agent**\n\n"
+                    "If you downloaded initiated orders using the **'Download Ordered Data'** button, "
+                    "the Excel file is ready in:\n"
+                    "`excel_marg/latest/`")
+
+        # Show results if available in session state
+        res = st.session_state.get("ordered_items_upload_result")
+        if res:
+            if res.get("status") == "error":
+                st.error(f"🚨 **{res.get('message', 'Upload failed')}**")
+            elif res.get("status") == "success":
+                stats = res.get("stats", {})
+                st.success(f"🎉 **Pipeline Stock Successfully Updated!**")
+                c_o1, c_o2, c_o3, c_o4 = st.columns(4)
+                c_o1.metric("Rows Processed", stats.get('total_rows_processed', 0))
+                c_o2.metric("Products Matched", f"{stats.get('matched_count', 0)} / {stats.get('total_rows_processed', 0)}")
+                c_o3.metric("Catalog Items Updated", stats.get('unique_products_updated', 0))
+                c_o4.metric("Units On Order", f"{stats.get('total_units_on_order', 0):,.0f}")
+
+                matched_items = stats.get('matched_items', [])
+                unmatched_items = stats.get('unmatched_items', [])
+
+                if matched_items:
+                    with st.expander(f"📋 View Matched Products ({len(matched_items)} items)", expanded=False):
+                        df_matched = pd.DataFrame(matched_items)
+                        st.dataframe(df_matched, use_container_width=True)
+
+                if unmatched_items:
+                    with st.expander(f"⚠️ View Unmatched Items ({len(unmatched_items)} items not found in catalog)", expanded=False):
+                        df_unmatched = pd.DataFrame(unmatched_items)
+                        st.dataframe(df_unmatched, use_container_width=True)
+
+                if st.button("🚀 Re-Run Procurement Suggestions with Updated Pipeline Stock", type="primary", key="btn_rerun_with_pipeline"):
+                    with st.spinner("Re-computing replenishment suggestions with live pipeline on-order stock..."):
+                        try:
+                            run_res = requests.post(f"{BACKEND_URL}/runs?lead_time_days={int(config_lead_time)}", timeout=30)
+                            if run_res.status_code == 200:
+                                st.session_state["upload_banner"] = "🎉 Replenishment suggestions re-calculated! Pipeline on-order stock deducted from net need."
+                                st.query_params["tab"] = "proposals"
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Error re-running procurement: {e}")
+
+
     # ---------------------------------------------------------------------------
     # TAB 2: Review & Correct Order Suggestions
     # ---------------------------------------------------------------------------
