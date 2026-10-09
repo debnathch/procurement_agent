@@ -252,6 +252,18 @@ class PharmaProductMatcher:
         if fuzzy_candidate and fuzzy_score >= 0.82:
             return fuzzy_candidate, f"Fuzzy NLP ({fuzzy_score:.0%})", round(fuzzy_score, 2)
 
+        # ── Tier 6b: Brand Root 1-Character Typo Match (e.g. MEROJOY <-> MEROJAY) ─
+        target_brand = clean_target.split()[0] if clean_target else ""
+        if len(target_brand) >= 5 and target_form != 'GENERAL':
+            for item in self._index:
+                if target_form != item['form']:
+                    continue
+                cat_brand = item['clean'].split()[0] if item['clean'] else ""
+                if len(cat_brand) >= 5 and abs(len(target_brand) - len(cat_brand)) <= 1:
+                    mismatches = sum(c1 != c2 for c1, c2 in zip(target_brand, cat_brand)) + abs(len(target_brand) - len(cat_brand))
+                    if mismatches <= 1:
+                        return item['product'], "Brand Typo Correction", 0.90
+
         # ── Tier 7: Active Salt / Composition Search Fallback ────────────────
         if composition and len(composition) > 5:
             comp_clean = clean_pharma_name(composition)
