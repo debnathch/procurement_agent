@@ -557,7 +557,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
         with col_risk:
             qty_filter = st.selectbox(
                 "Order Qty Flag",
-                ["All Order Sizes", "🚩 High Qty (>50)", "🟡 Normal Qty (≤50)"]
+                ["All Order Sizes", "🚩 High Qty (>100)", "🟡 Normal Qty (≤100)"]
             )
     
         # Apply Filters
@@ -572,10 +572,10 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
             current_proposals = [p for p in current_proposals if p.get('status') == status_filter]
     
         # Apply Order Quantity Flag Filter
-        if qty_filter == "🚩 High Qty (>50)":
-            current_proposals = [p for p in current_proposals if p.get('recommended_qty', 0) > 50]
-        elif qty_filter == "🟡 Normal Qty (≤50)":
-            current_proposals = [p for p in current_proposals if 0 < p.get('recommended_qty', 0) <= 50]
+        if qty_filter == "🚩 High Qty (>100)":
+            current_proposals = [p for p in current_proposals if p.get('recommended_qty', 0) > 100]
+        elif qty_filter == "🟡 Normal Qty (≤100)":
+            current_proposals = [p for p in current_proposals if 0 < p.get('recommended_qty', 0) <= 100]
     
         # Sort alphabetically by product name (A-Z)
         current_proposals.sort(key=lambda p: str(p.get('product_name', '')).strip().upper())
@@ -659,7 +659,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                     {
                         'Product Code': p['product_code'],
                         'Product Name': p['product_name'],
-                        'Order Qty Flag': '🚩 > 50 (High Qty)' if p['recommended_qty'] > 50 else '🟡 ≤ 50 (Normal Qty)',
+                        'Order Qty Flag': '🚩 > 100 (High Qty)' if p['recommended_qty'] > 100 else '🟡 ≤ 100 (Normal Qty)',
                         'Company': p.get('company', 'General'),
                         'Manufacturer': p.get('manufacturer', 'General'),
                         'Default Supplier': p.get('supplier_name', 'Default Supplier'),
@@ -724,17 +724,17 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                     risk_badge = f'<span class="badge-fefo-ok">✅ Stock Shelf-Life Healthy (FEFO Clean)</span>'
     
                 # Order quantity color flag
-                qty_flag_icon = "🚩" if p['recommended_qty'] > 50 else "🟡"
-                qty_flag_text = "🚩 High Qty (>50)" if p['recommended_qty'] > 50 else "🟡 Normal Qty (≤50)"
+                qty_flag_icon = "🚩" if p['recommended_qty'] > 100 else "🟡"
+                qty_flag_text = "🚩 High Qty (>100)" if p['recommended_qty'] > 100 else "🟡 Normal Qty (≤100)"
     
                 with st.expander(
                     f"{qty_flag_icon} **{p['product_name']}** (`{p['product_code']}`) | 🏢 **{p.get('company', 'General')}** | 🏭 **{p.get('manufacturer', 'General')}** | 🚚 Supplier: **{p.get('supplier_name', 'Default Supplier')}** | 🏷️ Batch(es): `{p.get('batch_numbers', 'DEFAULT')}` — Suggested: **{p['recommended_qty']:g} units** [{qty_flag_text}] (₹{p['estimated_value']:,.2f}) | Status: :{st_color}[{p['status']}]",
                     expanded=(p['status'] == 'PENDING' and len(page_proposals) <= 5)
                 ):
-                    if p['recommended_qty'] > 50:
-                        st.error(f"🚩 **Order Quantity Red Flag (> 50 Units)**: Recommended order quantity is **{p['recommended_qty']:g} units** (> 50 units). Default supplier: **{p.get('supplier_name', 'Default Supplier')}**, Last purchase cost: **₹{p.get('unit_cost', 0):.2f}**.")
+                    if p['recommended_qty'] > 100:
+                        st.error(f"🚩 **Order Quantity Red Flag (> 100 Units)**: Recommended order quantity is **{p['recommended_qty']:g} units** (> 100 units). Default supplier: **{p.get('supplier_name', 'Default Supplier')}**, Last purchase cost: **₹{p.get('unit_cost', 0):.2f}**.")
                     else:
-                        st.warning(f"🟡 **Order Quantity Yellow Flag (≤ 50 Units)**: Recommended order quantity is **{p['recommended_qty']:g} units** (≤ 50 units). Default supplier: **{p.get('supplier_name', 'Default Supplier')}**, Last purchase cost: **₹{p.get('unit_cost', 0):.2f}**.")
+                        st.warning(f"🟡 **Order Quantity Yellow Flag (≤ 100 Units)**: Recommended order quantity is **{p['recommended_qty']:g} units** (≤ 100 units). Default supplier: **{p.get('supplier_name', 'Default Supplier')}**, Last purchase cost: **₹{p.get('unit_cost', 0):.2f}**.")
     
                     st.markdown(risk_badge, unsafe_allow_html=True)
                     st.markdown(f"**Agent Rationale:** {p.get('rationale', 'N/A')}")
