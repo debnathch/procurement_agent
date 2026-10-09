@@ -137,3 +137,53 @@ def render_landing_page(BACKEND_URL: str, is_healthy: bool):
         **⚡ Real-Time Recalculation**  
         Upload stock and sales exports anytime to update reorder points, dues, and expiry risk in seconds.
         """)
+
+    st.markdown("---")
+    st.markdown("### 🗑️ Database Management")
+    st.caption("Clean-slate mode: Wipe all operational records from the database at any time before starting a new run or importing fresh data.")
+    col_p1, col_p2 = st.columns([2, 1])
+    with col_p1:
+        st.markdown("""
+        Clicking the button will **permanently wipe all operational data** from the database:
+        - Catalog Products & Packaging Masters
+        - Inventory Batches, Stock-On-Hand & Pipeline On-Order
+        - Historical Sales Transactions & Demand Velocity
+        - Supplier & Manufacturer Masters
+        - Procurement Proposals, Approvals & Runs
+        - Customer Ledgers & Outstanding Dues
+        """)
+    with col_p2:
+        if st.button(
+            "🗑️ Purge & Wipe Entire Database Now",
+            key="btn_landing_purge_db",
+            type="secondary",
+            use_container_width=True,
+            help="Wipes all operational tables (Products, Inventory, Sales, Suppliers, Proposals, Customers) to start 100% clean."
+        ):
+            try:
+                p_res = requests.post(f"{BACKEND_URL}/system/reset-db", timeout=15)
+                if p_res.status_code == 200:
+                    for k in [
+                        'uploader_version',
+                        'ordered_uploader_version',
+                        'sales_master_version',
+                        'sales_prod_version',
+                        'last_upload_stats',
+                        'last_upload_success_files',
+                        'ordered_items_upload_result',
+                        'sales_upload_banner',
+                        'sales_upload_error',
+                        'upload_banner',
+                    ]:
+                        st.session_state.pop(k, None)
+                    st.session_state['uploader_version'] = st.session_state.get('uploader_version', 0) + 1
+                    st.session_state['ordered_uploader_version'] = st.session_state.get('ordered_uploader_version', 0) + 1
+                    st.session_state['sales_master_version'] = st.session_state.get('sales_master_version', 0) + 1
+                    st.session_state['sales_prod_version'] = st.session_state.get('sales_prod_version', 0) + 1
+                    st.success("✅ Database purged completely! All operational tables cleared.")
+                    st.rerun()
+                else:
+                    st.error(f"Error resetting database: {p_res.text}")
+            except Exception as e:
+                st.error(f"Reset error: {e}")
+

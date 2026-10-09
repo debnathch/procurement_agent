@@ -60,60 +60,26 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             </div>
             """, unsafe_allow_html=True)
 
+            master_key = f"sales_uploader_master_file_{st.session_state.get('sales_master_version', 0)}"
             master_file = st.file_uploader(
                 "Upload Master Customer Ledger (.xlsx, .xls, .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="sales_uploader_master_file",
+                key=master_key,
                 help="Upload MARG Customer Master list containing Ledger, Group, Debit, Credit columns."
             )
 
-            col_m_btn1, col_m_btn2 = st.columns([1.3, 1])
-            with col_m_btn1:
-                do_upload_master = st.button(
-                    "🚀 Ingest Customer Master",
-                    type="primary",
-                    key="btn_ingest_master",
-                    use_container_width=True
-                )
-            with col_m_btn2:
-                do_purge = st.button(
-                    "🗑️ Purge Customer DB",
-                    type="secondary",
-                    key="btn_purge_sales",
-                    use_container_width=True,
-                    help="Permanently delete all customer records, dues, and transaction history."
-                )
-
-            if do_purge:
-                with st.spinner("Purging customer database..."):
-                    try:
-                        res = requests.post(f"{BACKEND_URL}/sales/purge-customers", timeout=30)
-                        if res.status_code == 200:
-                            data = res.json()
-                            purged = data.get("purged", {})
-                            c_del = purged.get("deleted_customers", 0)
-                            r_del = purged.get("deleted_receivables", 0)
-                            s_del = purged.get("deleted_sales", 0)
-                            st.session_state["sales_upload_banner"] = (
-                                f"🗑️ Customer database purged! Removed {c_del} customer(s), "
-                                f"{r_del} receivable record(s), and {s_del} sales row(s)."
-                            )
-                            st.session_state["expand_sales_upload"] = True
-                            st.rerun()
-                        else:
-                            st.session_state["sales_upload_error"] = f"Purge failed ({res.status_code}): {res.text}"
-                            st.session_state["expand_sales_upload"] = True
-                            st.rerun()
-                    except Exception as e:
-                        st.session_state["sales_upload_error"] = f"Error communicating with backend: {e}"
-                        st.session_state["expand_sales_upload"] = True
-                        st.rerun()
+            do_upload_master = st.button(
+                "🚀 Ingest Customer Master",
+                type="primary",
+                key="btn_ingest_master",
+                use_container_width=True
+            )
 
             if do_upload_master:
                 if not master_file:
                     st.warning("⚠️ Please select a Master Customer Ledger file above before clicking 'Ingest Customer Master'.")
                 else:
-                    with st.spinner(f"Ingesting Customer Master '{master_file.name}' into database..."):
+                    with st.spinner("Ingesting Customer Master into database..."):
                         try:
                             files = {"file": (master_file.name, master_file.getvalue())}
                             params = {"clear_existing": False}
@@ -123,14 +89,15 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                                 stats = data.get("stats", {})
                                 c_count = stats.get('customers_upserted', 0)
                                 r_count = stats.get('receivables_upserted', 0)
+                                st.session_state["sales_master_version"] = st.session_state.get("sales_master_version", 0) + 1
                                 if c_count == 0 and r_count == 0:
                                     st.session_state["sales_upload_error"] = (
-                                        f"⚠️ File '{master_file.name}' was uploaded, but no customer records or dues columns were recognized. "
-                                        f"Please ensure columns like 'Ledger' (Customer Name), 'Group', 'Debit', 'Credit' are present."
+                                        "⚠️ File was uploaded, but no customer records or dues columns were recognized. "
+                                        "Please ensure columns like 'Ledger' (Customer Name), 'Group', 'Debit', 'Credit' are present."
                                     )
                                 else:
                                     st.session_state["sales_upload_banner"] = (
-                                        f"✅ Successfully ingested Master Customer Ledger '{master_file.name}'! "
+                                        f"✅ Successfully ingested Master Customer Ledger! "
                                         f"Customers: {c_count}, Dues & Liabilities Recorded: {r_count}"
                                     )
                                 st.session_state["expand_sales_upload"] = False
@@ -155,10 +122,11 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
             </div>
             """, unsafe_allow_html=True)
 
+            prod_key = f"sales_uploader_prod_file_{st.session_state.get('sales_prod_version', 0)}"
             product_file = st.file_uploader(
                 "Upload Product-Wise Sales Ledger (.xlsx, .xls, .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="sales_uploader_prod_file",
+                key=prod_key,
                 help="Upload MARG Customer Product Sales Ledger containing Date, Party Name, Particulars/Item, Qty, Rate, Amount."
             )
 
@@ -173,7 +141,7 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                 if not product_file:
                     st.warning("⚠️ Please select a Product-Wise Sales Ledger file above before clicking 'Ingest Product-Wise Sales Ledger'.")
                 else:
-                    with st.spinner(f"Ingesting Product-Wise Ledger '{product_file.name}' into database..."):
+                    with st.spinner("Ingesting Product-Wise Ledger into database..."):
                         try:
                             files = {"file": (product_file.name, product_file.getvalue())}
                             params = {"clear_existing": False}
@@ -184,14 +152,15 @@ def render_sales_page(BACKEND_URL: str, is_healthy: bool):
                                 s_count = stats.get('sales_inserted', 0)
                                 m_count = stats.get('matched_customers', 0)
                                 c_count = stats.get('customers_upserted', 0)
+                                st.session_state["sales_prod_version"] = st.session_state.get("sales_prod_version", 0) + 1
                                 if s_count == 0:
                                     st.session_state["sales_upload_error"] = (
-                                        f"⚠️ File '{product_file.name}' was uploaded, but no product sales transactions were recognized. "
-                                        f"Please ensure columns like Date, Party Name, Particulars / Item Description, Qty, Rate, or Amount are present."
+                                        "⚠️ File was uploaded, but no product sales transactions were recognized. "
+                                        "Please ensure columns like Date, Party Name, Particulars / Item Description, Qty, Rate, or Amount are present."
                                     )
                                 else:
                                     st.session_state["sales_upload_banner"] = (
-                                        f"✅ Successfully ingested Product-Wise Customer Ledger '{product_file.name}'! "
+                                        f"✅ Successfully ingested Product-Wise Customer Ledger! "
                                         f"Sales Transactions: {s_count}, Customers Linked: {m_count or c_count}. "
                                         f"Order history, near-expiry matching, and recommendations are now activated!"
                                     )

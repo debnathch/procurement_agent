@@ -147,6 +147,43 @@ else:
     st.sidebar.error("🔴 Backend Disconnected\nPlease ensure FastAPI is running on port 8000.")
 
 st.sidebar.markdown("---")
+st.sidebar.title("🗑️ Database Management")
+st.sidebar.caption("Clean-slate mode: Wipe all database records.")
+if st.sidebar.button(
+    "🗑️ Purge & Wipe Database",
+    key="btn_sidebar_purge_db",
+    type="secondary",
+    use_container_width=True,
+    help="Wipes all products, inventory batches, sales records, suppliers, proposals, and customer data to start 100% clean."
+):
+    try:
+        p_res = requests.post(f"{BACKEND_URL}/system/reset-db", timeout=15)
+        if p_res.status_code == 200:
+            for k in [
+                'uploader_version',
+                'ordered_uploader_version',
+                'sales_master_version',
+                'sales_prod_version',
+                'last_upload_stats',
+                'last_upload_success_files',
+                'ordered_items_upload_result',
+                'sales_upload_banner',
+                'sales_upload_error',
+                'upload_banner',
+            ]:
+                st.session_state.pop(k, None)
+            st.session_state['uploader_version'] = st.session_state.get('uploader_version', 0) + 1
+            st.session_state['ordered_uploader_version'] = st.session_state.get('ordered_uploader_version', 0) + 1
+            st.session_state['sales_master_version'] = st.session_state.get('sales_master_version', 0) + 1
+            st.session_state['sales_prod_version'] = st.session_state.get('sales_prod_version', 0) + 1
+            st.sidebar.success("✅ Database purged completely!")
+            st.rerun()
+        else:
+            st.sidebar.error(f"Error resetting database: {p_res.text}")
+    except Exception as e:
+        st.sidebar.error(f"Reset error: {e}")
+
+st.sidebar.markdown("---")
 
 # Render active page based on current_page
 active_page = st.session_state.get("current_page", "landing")

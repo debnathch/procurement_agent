@@ -293,23 +293,6 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                 except Exception as e:
                     st.warning(f"Could not fetch sample template: {e}")
     
-            st.markdown("---")
-            st.write("##### 🗑️ Database Management")
-            st.caption("Clean-slate mode: Wipe previous database records at any time before a new run.")
-            if st.button("Purge & Wipe Database Now", type="secondary", use_container_width=True, help="Wipes all inventory, sales, suppliers, and proposals to start 100% clean"):
-                try:
-                    p_res = requests.post(f"{BACKEND_URL}/system/reset-db", timeout=10)
-                    if p_res.status_code == 200:
-                        st.session_state['uploader_version'] = st.session_state.get('uploader_version', 0) + 1
-                        st.session_state.pop('last_upload_stats', None)
-                        st.session_state.pop('last_upload_success_files', None)
-                        st.session_state["upload_banner"] = "✅ Database purged completely! All historical data and uploaded documents cleared."
-                        st.rerun()
-                    else:
-                        st.error(f"Error resetting database: {p_res.text}")
-                except Exception as e:
-                    st.error(f"Reset error: {e}")
-    
         with col_up1:
             uploader_key = f"marg_file_uploader_{st.session_state.get('uploader_version', 0)}"
             uploaded_files = st.file_uploader(
@@ -335,15 +318,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                     st.query_params["tab"] = "proposals"
                     st.rerun()
     
-            col_opt1, col_opt2 = st.columns([1, 1])
-            with col_opt1:
-                auto_run = st.checkbox("Automatically run Procurement Agent after ingestion", value=True)
-            with col_opt2:
-                clear_db_first = st.checkbox(
-                    "🧹 Refresh Database (wipe old data before import)",
-                    value=True,
-                    help="Recommended: Clears all existing products, inventory batches, suppliers, and past suggestions so only the fresh data remains in the database."
-                )
+            auto_run = st.checkbox("Automatically run Procurement Agent after ingestion", value=True)
     
             if uploaded_files:
                 st.success(f"📁 Loaded **{len(uploaded_files)}** file(s): `{'`, `'.join([f.name for f in uploaded_files])}`")
@@ -380,7 +355,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                                 is_first = (idx == 0)
                                 is_last = (idx == len(uploaded_files) - 1)
                                 should_run_agent = (auto_run and is_last)
-                                should_clear = (clear_db_first and is_first)
+                                should_clear = False
     
                                 files = {'file': (f.name, f.getvalue(), f.type)}
                                 try:
@@ -421,10 +396,11 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
 
         col_ord1, col_ord2 = st.columns([2, 1])
         with col_ord1:
+            ordered_uploader_key = f"ordered_items_file_uploader_{st.session_state.get('ordered_uploader_version', 0)}"
             ordered_file = st.file_uploader(
                 "Select Already Ordered Items Excel/CSV (.xlsx, .xls, .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="ordered_items_file_uploader",
+                key=ordered_uploader_key,
                 help="Upload order report containing Product Name and Order Qty (e.g. Initiated orders downloaded from Bengal Remedies portal)"
             )
 
@@ -447,6 +423,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                             resp = requests.post(f"{BACKEND_URL}/procurement/upload-ordered-items", files=upload_files, timeout=60)
                             if resp.status_code == 200:
                                 res_data = resp.json()
+                                st.session_state["ordered_uploader_version"] = st.session_state.get("ordered_uploader_version", 0) + 1
                                 st.session_state["ordered_items_upload_result"] = res_data
                                 st.session_state["upload_banner"] = f"✅ Successfully updated pipeline orders! {res_data.get('stats', {}).get('unique_products_updated', 0)} products updated ({res_data.get('stats', {}).get('total_units_on_order', 0):,.0f} units on order)."
                                 st.rerun()
