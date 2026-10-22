@@ -260,6 +260,482 @@ def list_proposals(
     return [_proposal_dict(p) for p in proposals]
 
 
+# ---------------------------------------------------------------------------
+# Agentic Ecosystem APIs — Procurement Recommendations by Category & Division
+# ---------------------------------------------------------------------------
+
+class OrderItemResponse(BaseModel):
+    proposal_id: int
+    product_code: str
+    product_name: str
+    division: str
+    company: str
+    category: str
+    manufacturer: str
+    supplier_id: Optional[str] = None
+    supplier_name: Optional[str] = None
+    recommended_qty: float
+    approved_qty: Optional[float] = None
+    unit_cost: float
+    estimated_value: float
+    avg_daily_demand: float
+    lead_time_days: int
+    stock_on_hand: float
+    stock_on_order: float
+    order_urgency: str
+    order_qty_flag: str
+    near_expiry_qty: float
+    expiry_risk_score: float
+    expiry_action: Optional[str] = None
+    rationale: Optional[str] = None
+    status: str
+    created_at: Optional[str] = None
+
+
+class DivisionSummary(BaseModel):
+    division: str
+    product_count: int
+    total_units: float
+    total_value: float
+
+
+class CategorySummary(BaseModel):
+    category: str
+    product_count: int
+    total_units: float
+    total_value: float
+
+
+class OrdersByCategoryDivisionResponse(BaseModel):
+    status: str
+    metadata: dict
+    summary_by_division: list[DivisionSummary]
+    summary_by_category: list[CategorySummary]
+    items: list[OrderItemResponse]
+
+
+def _resolve_param(val, default=None):
+    if val is None:
+        return default
+    if isinstance(val, (str, int, float, bool)):
+        return val
+    if hasattr(val, 'default'):
+        return val.default if val.default is not ... else default
+    return default
+
+
+def _get_product_category_map(db: Session) -> dict[str, str]:
+    """Build a mapping of product_code to category."""
+    rows = db.execute(
+        select(Product.product_code, Product.category)
+        .where(Product.category.is_not(None))
+        .group_by(Product.product_code)
+    ).all()
+    return {r[0]: (r[1] or 'General / Active Shelf-Life') for r in rows}
+
+
+@app.get(
+    '/procurement/orders-by-category-division',
+    response_model=OrdersByCategoryDivisionResponse,
+    tags=['agent-procurement'],
+    summary="Agent API: Get products to order filtered by Category and Division"
+)
+def get_orders_by_category_and_division(
+    division: Optional[str] = Query(None, description="Filter by marketing division / company (e.g. 'BENGAL REMEDIES', 'GENIAL LIFECARE')"),
+    category: Optional[str] = Query(None, description="Filter by product category (e.g. 'Active Shelf-Life', 'General / No Expiry')"),
+    manufacturer: Optional[str] = Query(None, description="Filter by manufacturer unit (e.g. 'JMH', 'ORISON')"),
+    status: Optional[str] = Query('PENDING', description="Filter by proposal lifecycle status: 'PENDING', 'APPROVED_PENDING_EXECUTION', 'EXECUTED', 'REJECTED', or 'ALL'"),
+    urgency: Optional[str] = Query(None, description="Filter by urgency: 'high' (> 100 units) or 'normal' (<= 100 units)"),
+    min_recommended_qty: Optional[float] = Query(None, description="Minimum recommended order quantity threshold"),
+    min_order_value: Optional[float] = Query(None, description="Minimum estimated purchase order value in INR"),
+    search: Optional[str] = Query(None, description="Search keyword for product name or product code"),
+    sort_by: str = Query('estimated_value', description="Sort field: 'estimated_value', 'recommended_qty', 'product_name', 'avg_daily_demand'"),
+    sort_order: str = Query('desc', description="Sort direction: 'desc' or 'asc'"),
+    limit: int = Query(100, ge=1, le=1000, description="Pagination limit (max 1000)"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    db: Session = Depends(get_db),
+):
+    """
+    Standardized procurement intelligence API designed for consumption by autonomous AI agents.
+    
+    Enables autonomous agents in an agentic ecosystem to query exactly which products to reorder,
+    sliced by pharmaceutical marketing division and product category, with complete financial and
+    inventory positioning metrics.
+    """
+    status = _resolve_param(status, 'PENDING')
+    division = _resolve_param(division, None)
+    category = _resolve_param(category, None)
+    manufacturer = _resolve_param(manufacturer, None)
+    urgency = _resolve_param(urgency, None)
+    min_recommended_qty = _resolve_param(min_recommended_qty, None)
+    min_order_value = _resolve_param(min_order_value, None)
+    search = _resolve_param(search, None)
+    sort_by = _resolve_param(sort_by, 'estimated_value')
+    sort_order = _resolve_param(sort_order, 'desc')
+    limit = _resolve_param(limit, 100)
+    offset = _resolve_param(offset, 0)
+
+    code_to_cat = _get_product_category_map(db)
+
+    stmt = select(ProcurementProposal)
+    if status and status.upper() != 'ALL':
+        stmt = stmt.where(ProcurementProposal.status == status.upper())
+    
+    proposals = db.scalars(stmt).all()
+
+    # Enriched in-memory filtering
+    filtered_items: list[dict] = []
+    for p in proposals:
+        if is_ignored_item_name(p.product_name):
+            continue
+
+        p_div = p.company or 'General'
+        p_cat = code_to_cat.get(p.product_code, 'General / Active Shelf-Life')
+        p_mfr = p.manufacturer or 'General'
+
+        # Filter: Division / Company (case-insensitive substring)
+        if division and division.strip().lower() != 'all':
+            if division.strip().lower() not in p_div.lower():
+                continue
+
+        # Filter: Category (case-insensitive substring)
+        if category and category.strip().lower() != 'all':
+            if category.strip().lower() not in p_cat.lower():
+                continue
+
+        # Filter: Manufacturer
+        if manufacturer and manufacturer.strip().lower() != 'all':
+            if manufacturer.strip().lower() not in p_mfr.lower():
+                continue
+
+        # Filter: Urgency
+        if urgency:
+            u_clean = urgency.strip().lower()
+            if u_clean == 'high' and p.recommended_qty <= 100:
+                continue
+            elif u_clean == 'normal' and (p.recommended_qty <= 0 or p.recommended_qty > 100):
+                continue
+
+        # Filter: Min recommended qty
+        if min_recommended_qty is not None and p.recommended_qty < min_recommended_qty:
+            continue
+
+        # Filter: Min order value
+        if min_order_value is not None and p.estimated_value < min_order_value:
+            continue
+
+        # Filter: Keyword search
+        if search:
+            s_clean = search.strip().lower()
+            if s_clean not in p.product_name.lower() and s_clean not in p.product_code.lower():
+                continue
+
+        urgency_label = "HIGH" if p.recommended_qty > 100 else "NORMAL"
+        qty_flag = "🚩 > 100 (High Qty)" if p.recommended_qty > 100 else "🟡 ≤ 100 (Normal Qty)"
+
+        filtered_items.append({
+            'proposal_id': p.id,
+            'product_code': p.product_code,
+            'product_name': p.product_name,
+            'division': p_div,
+            'company': p_div,
+            'category': p_cat,
+            'manufacturer': p_mfr,
+            'supplier_id': p.supplier_id,
+            'supplier_name': p.supplier_name or 'Default Supplier',
+            'recommended_qty': p.recommended_qty,
+            'approved_qty': p.approved_qty,
+            'unit_cost': p.unit_cost,
+            'estimated_value': p.estimated_value,
+            'avg_daily_demand': round(p.avg_daily_demand, 4),
+            'lead_time_days': p.lead_time_days,
+            'stock_on_hand': p.stock_on_hand,
+            'stock_on_order': p.stock_on_order,
+            'order_urgency': urgency_label,
+            'order_qty_flag': qty_flag,
+            'near_expiry_qty': p.near_expiry_qty,
+            'expiry_risk_score': p.expiry_risk_score,
+            'expiry_action': p.expiry_action,
+            'rationale': p.rationale,
+            'status': p.status,
+            'created_at': p.created_at.isoformat() if p.created_at else None,
+        })
+
+    # Aggregations across all matching items
+    total_matching = len(filtered_items)
+    total_units = sum(i['recommended_qty'] for i in filtered_items)
+    total_value = sum(i['estimated_value'] for i in filtered_items)
+
+    div_agg = defaultdict(lambda: {'count': 0, 'units': 0.0, 'value': 0.0})
+    cat_agg = defaultdict(lambda: {'count': 0, 'units': 0.0, 'value': 0.0})
+
+    for item in filtered_items:
+        d = item['division']
+        c = item['category']
+        div_agg[d]['count'] += 1
+        div_agg[d]['units'] += item['recommended_qty']
+        div_agg[d]['value'] += item['estimated_value']
+        cat_agg[c]['count'] += 1
+        cat_agg[c]['units'] += item['recommended_qty']
+        cat_agg[c]['value'] += item['estimated_value']
+
+    summary_by_division = [
+        DivisionSummary(
+            division=k,
+            product_count=v['count'],
+            total_units=round(v['units'], 2),
+            total_value=round(v['value'], 2)
+        )
+        for k, v in sorted(div_agg.items(), key=lambda x: x[1]['value'], reverse=True)
+    ]
+
+    summary_by_category = [
+        CategorySummary(
+            category=k,
+            product_count=v['count'],
+            total_units=round(v['units'], 2),
+            total_value=round(v['value'], 2)
+        )
+        for k, v in sorted(cat_agg.items(), key=lambda x: x[1]['value'], reverse=True)
+    ]
+
+    # Sorting
+    reverse = (sort_order.lower() == 'desc')
+    if sort_by == 'recommended_qty':
+        filtered_items.sort(key=lambda x: x['recommended_qty'], reverse=reverse)
+    elif sort_by == 'product_name':
+        filtered_items.sort(key=lambda x: x['product_name'].upper(), reverse=reverse)
+    elif sort_by == 'avg_daily_demand':
+        filtered_items.sort(key=lambda x: x['avg_daily_demand'], reverse=reverse)
+    else:
+        # Default: estimated_value
+        filtered_items.sort(key=lambda x: x['estimated_value'], reverse=reverse)
+
+    # Pagination slice
+    paged_items = filtered_items[offset : offset + limit]
+
+    return OrdersByCategoryDivisionResponse(
+        status="success",
+        metadata={
+            "total_matching_products": total_matching,
+            "total_recommended_units": round(total_units, 2),
+            "total_estimated_value": round(total_value, 2),
+            "limit": limit,
+            "offset": offset,
+            "has_more": total_matching > (offset + len(paged_items)),
+            "filters_applied": {
+                "division": division,
+                "category": category,
+                "manufacturer": manufacturer,
+                "status": status,
+                "urgency": urgency,
+                "min_recommended_qty": min_recommended_qty,
+                "min_order_value": min_order_value,
+                "search": search,
+            }
+        },
+        summary_by_division=summary_by_division,
+        summary_by_category=summary_by_category,
+        items=[OrderItemResponse(**item) for item in paged_items],
+    )
+
+
+@app.get(
+    '/procurement/divisions',
+    tags=['agent-procurement'],
+    summary="Agent API: List all marketing divisions with ordering metrics"
+)
+def list_procurement_divisions(
+    category: Optional[str] = Query(None, description="Optional category filter"),
+    status: Optional[str] = Query('PENDING', description="Proposal status filter (default: 'PENDING')"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns an aggregated list of all pharmaceutical marketing divisions / companies
+    having active order proposals, sorted by total purchase value.
+    """
+    status = _resolve_param(status, 'PENDING')
+    category = _resolve_param(category, None)
+
+    code_to_cat = _get_product_category_map(db)
+
+    stmt = select(ProcurementProposal)
+    if status and status.upper() != 'ALL':
+        stmt = stmt.where(ProcurementProposal.status == status.upper())
+    proposals = db.scalars(stmt).all()
+
+    div_data = defaultdict(lambda: {'count': 0, 'units': 0.0, 'value': 0.0, 'products': []})
+
+    for p in proposals:
+        if is_ignored_item_name(p.product_name):
+            continue
+        p_cat = code_to_cat.get(p.product_code, 'General / Active Shelf-Life')
+        if category and category.strip().lower() != 'all':
+            if category.strip().lower() not in p_cat.lower():
+                continue
+
+        p_div = p.company or 'General'
+        div_data[p_div]['count'] += 1
+        div_data[p_div]['units'] += p.recommended_qty
+        div_data[p_div]['value'] += p.estimated_value
+        div_data[p_div]['products'].append({
+            'product_code': p.product_code,
+            'product_name': p.product_name,
+            'recommended_qty': p.recommended_qty,
+            'estimated_value': p.estimated_value
+        })
+
+    result_divisions = []
+    for div_name, data in sorted(div_data.items(), key=lambda x: x[1]['value'], reverse=True):
+        top_prods = sorted(data['products'], key=lambda x: x['estimated_value'], reverse=True)[:3]
+        result_divisions.append({
+            'division': div_name,
+            'pending_order_count': data['count'],
+            'total_recommended_qty': round(data['units'], 2),
+            'total_estimated_value': round(data['value'], 2),
+            'top_products': top_prods
+        })
+
+    return {
+        'status': 'success',
+        'total_divisions': len(result_divisions),
+        'divisions': result_divisions
+    }
+
+
+@app.get(
+    '/procurement/categories',
+    tags=['agent-procurement'],
+    summary="Agent API: List all product categories with ordering metrics"
+)
+def list_procurement_categories(
+    division: Optional[str] = Query(None, description="Optional division filter"),
+    status: Optional[str] = Query('PENDING', description="Proposal status filter (default: 'PENDING')"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns an aggregated list of all product categories having active order proposals,
+    sorted by total purchase value.
+    """
+    status = _resolve_param(status, 'PENDING')
+    division = _resolve_param(division, None)
+
+    code_to_cat = _get_product_category_map(db)
+
+    stmt = select(ProcurementProposal)
+    if status and status.upper() != 'ALL':
+        stmt = stmt.where(ProcurementProposal.status == status.upper())
+    proposals = db.scalars(stmt).all()
+
+    cat_data = defaultdict(lambda: {'count': 0, 'units': 0.0, 'value': 0.0})
+
+    for p in proposals:
+        if is_ignored_item_name(p.product_name):
+            continue
+        p_div = p.company or 'General'
+        if division and division.strip().lower() != 'all':
+            if division.strip().lower() not in p_div.lower():
+                continue
+
+        p_cat = code_to_cat.get(p.product_code, 'General / Active Shelf-Life')
+        cat_data[p_cat]['count'] += 1
+        cat_data[p_cat]['units'] += p.recommended_qty
+        cat_data[p_cat]['value'] += p.estimated_value
+
+    result_categories = [
+        {
+            'category': cat_name,
+            'pending_order_count': data['count'],
+            'total_recommended_qty': round(data['units'], 2),
+            'total_estimated_value': round(data['value'], 2),
+        }
+        for cat_name, data in sorted(cat_data.items(), key=lambda x: x[1]['value'], reverse=True)
+    ]
+
+    return {
+        'status': 'success',
+        'total_categories': len(result_categories),
+        'categories': result_categories
+    }
+
+
+@app.get(
+    '/procurement/divisions-categories-summary',
+    tags=['agent-procurement'],
+    summary="Agent API: Hierarchical Division -> Category breakdown"
+)
+def get_divisions_categories_summary(
+    status: Optional[str] = Query('PENDING', description="Proposal status filter (default: 'PENDING')"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns a complete hierarchical tree (Division -> Categories) for fast macro-level
+    decision making by autonomous agents.
+    """
+    status = _resolve_param(status, 'PENDING')
+
+    code_to_cat = _get_product_category_map(db)
+
+    stmt = select(ProcurementProposal)
+    if status and status.upper() != 'ALL':
+        stmt = stmt.where(ProcurementProposal.status == status.upper())
+    proposals = db.scalars(stmt).all()
+
+    hierarchy = defaultdict(lambda: {
+        'total_items': 0,
+        'total_units': 0.0,
+        'total_value': 0.0,
+        'categories': defaultdict(lambda: {'item_count': 0, 'total_units': 0.0, 'total_value': 0.0})
+    })
+
+    total_prods = 0
+    grand_value = 0.0
+
+    for p in proposals:
+        if is_ignored_item_name(p.product_name):
+            continue
+        p_div = p.company or 'General'
+        p_cat = code_to_cat.get(p.product_code, 'General / Active Shelf-Life')
+
+        hierarchy[p_div]['total_items'] += 1
+        hierarchy[p_div]['total_units'] += p.recommended_qty
+        hierarchy[p_div]['total_value'] += p.estimated_value
+
+        hierarchy[p_div]['categories'][p_cat]['item_count'] += 1
+        hierarchy[p_div]['categories'][p_cat]['total_units'] += p.recommended_qty
+        hierarchy[p_div]['categories'][p_cat]['total_value'] += p.estimated_value
+
+        total_prods += 1
+        grand_value += p.estimated_value
+
+    output_divisions = []
+    for div_name, div_info in sorted(hierarchy.items(), key=lambda x: x[1]['total_value'], reverse=True):
+        cats_list = [
+            {
+                'category': c_name,
+                'item_count': c_data['item_count'],
+                'total_units': round(c_data['total_units'], 2),
+                'total_value': round(c_data['total_value'], 2)
+            }
+            for c_name, c_data in sorted(div_info['categories'].items(), key=lambda x: x[1]['total_value'], reverse=True)
+        ]
+        output_divisions.append({
+            'division': div_name,
+            'total_items': div_info['total_items'],
+            'total_units': round(div_info['total_units'], 2),
+            'total_value': round(div_info['total_value'], 2),
+            'categories': cats_list
+        })
+
+    return {
+        'status': 'success',
+        'total_divisions': len(output_divisions),
+        'total_products_to_order': total_prods,
+        'total_estimated_value': round(grand_value, 2),
+        'divisions': output_divisions
+    }
+
+
 @app.get('/proposals/{proposal_id}', tags=['proposals'])
 def get_proposal(proposal_id: int, db: Session = Depends(get_db)):
     """
