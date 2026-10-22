@@ -267,7 +267,7 @@ async def run_download_agent(
             # ── 2. Login ──────────────────────────────────────────────────────
             _emit("🔐 Entering credentials...")
             email_field = page.locator('input[name="emailId"], input[type="email"], #email').first
-            await email_field.wait_for(state="visible", timeout=15000)
+            await email_field.wait_for(state="visible", timeout=20000)
             await email_field.fill(LOGIN_EMAIL)
             _emit(f"   ✅ Email entered: {LOGIN_EMAIL}")
 
@@ -276,46 +276,70 @@ async def run_download_agent(
             _emit("   ✅ Password entered.")
 
             submit_btn = page.locator('button[type="submit"], button:has-text("Login")').first
-            await submit_btn.click()
-            _emit("   ✅ Clicked Login button. Waiting for session authorization...")
+            _emit("   🔑 Submitting login credentials and waiting for API authentication...")
 
-            # Wait for URL to transition away from /login
             try:
-                await page.wait_for_url(lambda u: "/login" not in u, timeout=20000)
+                async with page.expect_response(
+                    lambda r: ("login" in r.url or "auth" in r.url or "user" in r.url) and r.request.method == "POST",
+                    timeout=30000,
+                ) as resp_info:
+                    await submit_btn.click()
+                resp = await resp_info.value
+                _emit(f"   ✅ Received login API authorization (HTTP {resp.status}).")
+            except Exception as resp_err:
+                _emit(f"   ℹ️ Login API response note ({resp_err}); verifying session...")
+                try:
+                    await submit_btn.click()
+                except Exception:
+                    pass
+
+            # Ensure we land on authenticated dashboard or businessType view
+            _emit("   ⏳ Establishing authenticated dashboard session...")
+            try:
+                await page.wait_for_url(
+                    lambda u: any(k in u.lower() for k in ("businesstype", "pcd", "procurement", "dashboard")),
+                    timeout=25000,
+                )
             except Exception:
-                await page.wait_for_timeout(3500)
-            _emit(f"   📍 Post-login URL: {page.url}")
+                proc_sidebar = page.get_by_text("Procurement", exact=False).first
+                await proc_sidebar.wait_for(state="visible", timeout=25000)
+
+            _emit(f"   📍 Post-login dashboard reached: {page.url}")
+            await page.wait_for_timeout(1500)
 
             # ── 3. Navigate to Procurement Orders ─────────────────────────────
-            orders_url = f"{connected_base}/procurement/procurement-order"
-            _emit(f"📂 Navigating directly to Procurement Orders: {orders_url} ...")
-            try:
-                await page.goto(orders_url, wait_until="domcontentloaded", timeout=45000)
-                await page.wait_for_timeout(2500)
-            except Exception as goto_err:
-                _emit(f"   ⚠️ Direct navigation to orders gave ({goto_err}). Checking UI menu...")
+            _emit("📂 Navigating to Procurement Orders...")
 
-            # Verify if status filter input is visible; if not, attempt sidebar click
-            status_input = page.locator('input[placeholder="Filter By Status"]').first
-            is_filter_ready = False
+            menu_nav_success = False
             try:
-                await status_input.wait_for(state="visible", timeout=6000)
-                is_filter_ready = True
-            except Exception:
-                is_filter_ready = False
-
-            if not is_filter_ready:
-                _emit("   🧭 Status filter not visible yet. Attempting menu navigation...")
                 proc_nav = page.get_by_text("Procurement", exact=False).first
-                if await proc_nav.is_visible(timeout=5000):
-                    await proc_nav.click()
-                    await page.wait_for_timeout(2000)
-                orders_link = page.get_by_text("Orders", exact=True).first
-                if await orders_link.is_visible(timeout=5000):
-                    await orders_link.click()
-                    await page.wait_for_timeout(3000)
+                await proc_nav.wait_for(state="visible", timeout=15000)
+                await proc_nav.click()
+                _emit("   ✅ Clicked 'Procurement' menu.")
+                await page.wait_for_timeout(1000)
 
-            _emit(f"   📍 Orders page reached: {page.url}")
+                orders_link = page.get_by_text("Orders", exact=True).first
+                await orders_link.wait_for(state="visible", timeout=15000)
+                await orders_link.click()
+                _emit("   ✅ Clicked 'Orders' submenu.")
+                menu_nav_success = True
+            except Exception as menu_err:
+                _emit(f"   ⚠️ Menu navigation notice: {menu_err}. Trying direct page navigation...")
+
+            status_input = page.locator('input[placeholder="Filter By Status"]').first
+            try:
+                await status_input.wait_for(state="visible", timeout=12000)
+            except Exception:
+                orders_url = f"{connected_base}/procurement/procurement-order"
+                _emit(f"   🔄 Navigating directly to orders page URL: {orders_url} ...")
+                await page.goto(orders_url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    await status_input.wait_for(state="visible", timeout=25000)
+                except Exception as wait_err:
+                    _emit(f"   ❌ Filter input not visible on page. Current URL: {page.url}, Title: '{await page.title()}'")
+                    raise RuntimeError(f"Orders page failed to load filter. URL: {page.url}. Error: {wait_err}")
+
+            _emit(f"   📍 Orders page reached and ready: {page.url}")
 
             # ── 4. Filter by Status = EXACT "Initiated" ───────────────────────
             _emit(f"🔍 Applying exact filter for Status = '{status_filter}'...")
