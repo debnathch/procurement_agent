@@ -101,6 +101,8 @@ async def _extract_screen_table_rows(page) -> tuple[list[str], list[dict]]:
         td_texts = [" ".join((await td.inner_text()).split()) for td in td_elements]
         if not td_texts or not any(td_texts):
             continue
+        if len(td_texts) == 1 and any(keyword in td_texts[0].lower() for keyword in ("no data", "no records", "loading")):
+            continue
 
         row_dict = {}
         for idx, col_name in enumerate(data_headers):
@@ -214,31 +216,46 @@ async def run_download_agent(
         page = await context.new_page()
 
         try:
-            # ── 1. Navigate to Portal with multi-URL fallback & resilient commit wait ──
-            candidate_urls = list(dict.fromkeys([
-                TARGET_URL,
-                "http://bengalremedies.com:9000",
-                "http://13.127.16.211:9000",
-            ]))
-            connected_url = None
+            # ── 1. Navigate directly to Portal Login ──────────────────────────
+            # Direct navigation to /login avoids redirect loops and in-flight navigation races
+            clean_target = TARGET_URL.rstrip('/')
+            candidate_bases = [clean_target]
+            if "www." in clean_target:
+                candidate_bases.append(clean_target.replace("www.", ""))
+            else:
+                parts = clean_target.split("://", 1)
+                if len(parts) == 2:
+                    candidate_bases.append(f"{parts[0]}://www.{parts[1]}")
+            candidate_bases.append("http://13.127.16.211:9000")
+            candidate_bases = list(dict.fromkeys(candidate_bases))
 
-            for c_url in candidate_urls:
-                _emit(f"🌐 Connecting to portal: {c_url} ...")
+            connected_base = None
+
+            for c_base in candidate_bases:
+                login_url = f"{c_base}/login" if not c_base.endswith("/login") else c_base
+                _emit(f"🌐 Connecting directly to login: {login_url} ...")
                 try:
-                    # wait_until='commit' completes on initial HTTP headers without hanging on slow assets
-                    await page.goto(c_url, wait_until="commit", timeout=45000)
-                    _emit("   ⏳ Initial response received. Waiting for login interface...")
+                    # Cancel any prior hanging navigation
+                    try:
+                        await page.evaluate("() => window.stop()")
+                    except Exception:
+                        pass
+
+                    await page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+                    _emit("   ⏳ Page loaded. Waiting for login form fields...")
+
                     email_field = page.locator('input[name="emailId"], input[type="email"], #email').first
-                    await email_field.wait_for(state="visible", timeout=30000)
-                    connected_url = c_url
-                    _emit(f"   ✅ Portal connected and login ready at: {connected_url}")
+                    await email_field.wait_for(state="visible", timeout=25000)
+
+                    connected_base = c_base
+                    _emit(f"   ✅ Login form visible at: {login_url}")
                     break
                 except Exception as nav_ex:
-                    _emit(f"   ⚠️ Could not reach {c_url} ({nav_ex}). Trying next fallback...")
+                    _emit(f"   ⚠️ Could not reach {login_url} ({nav_ex}). Trying next candidate...")
 
-            if not connected_url:
+            if not connected_base:
                 err_msg = (
-                    f"Unable to reach Bengal Remedies portal on port 9000 from cloud (attempted: {', '.join(candidate_urls)}).\n"
+                    f"Unable to reach Bengal Remedies portal login on port 9000 from cloud (attempted: {', '.join(candidate_bases)}).\n"
                     f"If the server is on AWS EC2, please ensure your EC2 Security Group has an Inbound Rule for "
                     f"Custom TCP port 9000 from 0.0.0.0/0 (Anywhere IPv4)."
                 )
@@ -252,7 +269,7 @@ async def run_download_agent(
             email_field = page.locator('input[name="emailId"], input[type="email"], #email').first
             await email_field.wait_for(state="visible", timeout=15000)
             await email_field.fill(LOGIN_EMAIL)
-            _emit("   ✅ Email entered: debnathch@gmail.com")
+            _emit(f"   ✅ Email entered: {LOGIN_EMAIL}")
 
             password_field = page.locator('input[name="password"], input[type="password"], #password').first
             await password_field.fill(LOGIN_PASSWORD)
@@ -260,31 +277,50 @@ async def run_download_agent(
 
             submit_btn = page.locator('button[type="submit"], button:has-text("Login")').first
             await submit_btn.click()
-            _emit("   ✅ Clicked Login button. Waiting for dashboard...")
-            await page.wait_for_timeout(3500)
-            _emit(f"   📍 Dashboard loaded: {page.url}")
+            _emit("   ✅ Clicked Login button. Waiting for session authorization...")
 
-            # ── 3. Navigate to Procurement → Orders ───────────────────────────
-            _emit("📂 Navigating to Procurement Orders...")
-            proc_nav = page.get_by_text("Procurement", exact=False).first
-            if await proc_nav.is_visible(timeout=5000):
-                await proc_nav.click()
-                await page.wait_for_timeout(2000)
+            # Wait for URL to transition away from /login
+            try:
+                await page.wait_for_url(lambda u: "/login" not in u, timeout=20000)
+            except Exception:
+                await page.wait_for_timeout(3500)
+            _emit(f"   📍 Post-login URL: {page.url}")
 
-            orders_link = page.get_by_text("Orders", exact=True).first
-            if await orders_link.is_visible(timeout=3000):
-                await orders_link.click()
-                await page.wait_for_timeout(3000)
-            else:
-                await page.goto(f"{connected_url}/procurement/procurement-order", wait_until="commit", timeout=30000)
-                await page.wait_for_timeout(3000)
+            # ── 3. Navigate to Procurement Orders ─────────────────────────────
+            orders_url = f"{connected_base}/procurement/procurement-order"
+            _emit(f"📂 Navigating directly to Procurement Orders: {orders_url} ...")
+            try:
+                await page.goto(orders_url, wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(2500)
+            except Exception as goto_err:
+                _emit(f"   ⚠️ Direct navigation to orders gave ({goto_err}). Checking UI menu...")
+
+            # Verify if status filter input is visible; if not, attempt sidebar click
+            status_input = page.locator('input[placeholder="Filter By Status"]').first
+            is_filter_ready = False
+            try:
+                await status_input.wait_for(state="visible", timeout=6000)
+                is_filter_ready = True
+            except Exception:
+                is_filter_ready = False
+
+            if not is_filter_ready:
+                _emit("   🧭 Status filter not visible yet. Attempting menu navigation...")
+                proc_nav = page.get_by_text("Procurement", exact=False).first
+                if await proc_nav.is_visible(timeout=5000):
+                    await proc_nav.click()
+                    await page.wait_for_timeout(2000)
+                orders_link = page.get_by_text("Orders", exact=True).first
+                if await orders_link.is_visible(timeout=5000):
+                    await orders_link.click()
+                    await page.wait_for_timeout(3000)
 
             _emit(f"   📍 Orders page reached: {page.url}")
 
             # ── 4. Filter by Status = EXACT "Initiated" ───────────────────────
             _emit(f"🔍 Applying exact filter for Status = '{status_filter}'...")
             status_input = page.locator('input[placeholder="Filter By Status"]').first
-            await status_input.wait_for(state="visible", timeout=8000)
+            await status_input.wait_for(state="visible", timeout=15000)
             await status_input.click()
             await page.wait_for_timeout(1000)
 
@@ -309,7 +345,12 @@ async def run_download_agent(
                 await page.keyboard.press("Enter")
                 _emit(f"   ✅ Filtered via keyboard input for: '{status_filter}'")
 
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(2500)
+            # Wait for table rows to appear after filter application
+            try:
+                await page.locator("table tbody tr").first.wait_for(state="visible", timeout=12000)
+            except Exception:
+                pass
 
             # ── 5. Screen Capture All Tables Across All Pages ──────────────────
             _emit("📊 Starting screen table capture across all pagination pages...")
