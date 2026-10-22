@@ -15,28 +15,50 @@ import asyncio
 import os
 import sys
 import logging
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 # Ensure Playwright finds browser cache regardless of any HOME environment override
-for _candidate_dir in [
-    Path("/Users/debz/Library/Caches/ms-playwright"),
-    Path.home() / "Library/Caches/ms-playwright",
-    Path(os.path.expanduser("~")) / "Library/Caches/ms-playwright",
-]:
-    if _candidate_dir.exists():
-        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_candidate_dir))
-        break
+if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
+    for _candidate_dir in [
+        Path("/Users/debz/Library/Caches/ms-playwright"),
+        Path.home() / "Library/Caches/ms-playwright",
+        Path.home() / ".cache/ms-playwright",
+        Path("/root/.cache/ms-playwright"),
+        Path(os.path.expanduser("~")) / "Library/Caches/ms-playwright",
+        Path(os.path.expanduser("~")) / ".cache/ms-playwright",
+    ]:
+        if _candidate_dir.exists():
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(_candidate_dir)
+            break
 
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
-# ── Configuration Defaults ───────────────────────────────────────────────────
+# ── Cloud Environment & Configuration Defaults ───────────────────────────────
+def is_cloud_environment() -> bool:
+    """Detects whether running on Render, in Docker, or on a headless Linux environment."""
+    return bool(
+        os.environ.get("RENDER")
+        or os.environ.get("DOCKER_RUNTIME")
+        or (sys.platform.startswith("linux") and not os.environ.get("DISPLAY"))
+    )
+
+def get_default_output_dir() -> Path:
+    """Returns local user output directory if valid locally, or a temporary directory."""
+    local_default = Path("/Users/debz/Documents/BR/Project/Ben_Rem/excel_marg/latest")
+    if not is_cloud_environment() and local_default.parent.exists():
+        return local_default
+    tmp = Path(tempfile.gettempdir()) / "procurement_orders"
+    tmp.mkdir(parents=True, exist_ok=True)
+    return tmp
+
 TARGET_URL      = "http://www.bengalremedies.com:9000"
 LOGIN_EMAIL     = "debnathch@gmail.com"
 LOGIN_PASSWORD  = "Br@2023"
-OUTPUT_DIR      = Path("/Users/debz/Documents/BR/Project/Ben_Rem/excel_marg/latest")
-HEADLESS        = False
+OUTPUT_DIR      = get_default_output_dir()
+HEADLESS        = is_cloud_environment()
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -99,22 +121,40 @@ async def run_download_agent(
     """
     global _progress_log
     _progress_log = []
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # On cloud / headless Linux, always enforce headless
+    if is_cloud_environment():
+        headless = True
+
+    try:
+        output_dir = Path(output_dir) if output_dir else get_default_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        output_dir = get_default_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     _emit("🚀 Starting Download Orders Agent (Screen Capture Mode)...")
     _emit(f"   Target URL: {TARGET_URL}")
     _emit(f"   Target Status: '{status_filter}' (Exact Match)")
     _emit(f"   Save Directory: {output_dir}")
-    _emit(f"   Browser View: {'Headless (Silent)' if headless else 'Visible (Interactive)'}")
+    _emit(f"   Browser View: {'Headless (Silent / Cloud)' if headless else 'Visible (Interactive)'}")
 
     all_scraped_rows: list[dict] = []
     final_headers: list[str] = []
 
+    launch_args = ["--start-maximized"]
+    if is_cloud_environment() or sys.platform.startswith("linux"):
+        launch_args.extend([
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+        ])
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=headless,
-            args=["--start-maximized"],
+            args=launch_args,
         )
         context = await browser.new_context(
             viewport={"width": 1440, "height": 900},
@@ -271,9 +311,14 @@ async def run_download_agent(
 
     _emit(f"🎉 Complete! All {len(all_scraped_rows)} records successfully saved to: {target_path}")
 
+    with open(target_path, "rb") as f:
+        file_bytes = f.read()
+
     return {
         "success": True,
         "file_path": str(target_path),
+        "filename": target_filename,
+        "file_bytes": file_bytes,
         "rows_downloaded": len(all_scraped_rows),
         "message": f"Successfully screen-captured all {len(all_scraped_rows)} product rows across {page_index} page(s) and saved to Excel.",
         "log": _progress_log,

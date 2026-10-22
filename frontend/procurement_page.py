@@ -48,46 +48,67 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
     # ── Download Ordered Data Agent Panel ──────────────────────────────────────
     if st.session_state.get("show_download_agent_panel", False):
         st.markdown("---")
+        is_cloud = (
+            "onrender.com" in BACKEND_URL.lower()
+            or bool(health_info.get("is_cloud", False))
+        )
+
         with st.container(border=True):
             col_dl_hdr, col_dl_close = st.columns([8, 1])
             with col_dl_hdr:
-                st.markdown("### ⬇️ Download Ordered Data — Web Automation Agent")
-                st.markdown(
-                    "This agent will **automatically open a Chrome browser**, log into "
-                    "`http://www.bengalremedies.com:9000`, navigate to **Procurement → Order**, "
-                    "filter by **Status = Initiated**, and download **all paginated rows** as Excel."
-                )
+                if is_cloud:
+                    st.markdown("### ⬇️ Download Ordered Data — Cloud Automation Service")
+                    st.markdown(
+                        "This cloud service connects to `http://www.bengalremedies.com:9000`, logs in, "
+                        "navigates to **Procurement → Order**, filters by **Status = Initiated**, captures "
+                        "all paginated records, and delivers an Excel file **downloadable directly to your computer**."
+                    )
+                else:
+                    st.markdown("### ⬇️ Download Ordered Data — Web Automation Agent")
+                    st.markdown(
+                        "This agent will **automatically open a Chrome browser**, log into "
+                        "`http://www.bengalremedies.com:9000`, navigate to **Procurement → Order**, "
+                        "filter by **Status = Initiated**, and download **all paginated rows** as Excel."
+                    )
             with col_dl_close:
                 if st.button("✖ Close", key="btn_close_download_panel"):
                     st.session_state.pop("show_download_agent_panel", None)
                     st.session_state.pop("download_agent_result", None)
                     st.rerun()
 
-            st.markdown("#### ⚙️ Settings")
-            dl_col1, dl_col2 = st.columns([3, 1])
-            with dl_col1:
-                output_dir = st.text_input(
-                    "📁 Save Location (folder on your PC)",
-                    value="/Users/debz/Documents/BR/Project/Ben_Rem/excel_marg/latest",
-                    key="download_agent_output_dir",
-                    help="The downloaded Excel file will be saved here."
+            if is_cloud:
+                st.info(
+                    "☁️ **Cloud Deployment Mode Active**: Browser automation runs silently in the cloud container. "
+                    "Once scraping is complete, a **Download Excel File** button will appear below, allowing you to save the file on your device."
                 )
-            with dl_col2:
-                headless_mode = st.checkbox(
-                    "🔇 Run Silently (headless)",
-                    value=False,
-                    key="download_agent_headless",
-                    help="Uncheck to watch the browser automation live. Check to run silently in background."
-                )
+                output_dir = None
+                headless_mode = True
+            else:
+                st.markdown("#### ⚙️ Settings")
+                dl_col1, dl_col2 = st.columns([3, 1])
+                with dl_col1:
+                    output_dir = st.text_input(
+                        "📁 Save Location (folder on your PC)",
+                        value="/Users/debz/Documents/BR/Project/Ben_Rem/excel_marg/latest",
+                        key="download_agent_output_dir",
+                        help="The downloaded Excel file will be saved here."
+                    )
+                with dl_col2:
+                    headless_mode = st.checkbox(
+                        "🔇 Run Silently (headless)",
+                        value=False,
+                        key="download_agent_headless",
+                        help="Uncheck to watch the browser automation live. Check to run silently in background."
+                    )
 
-            st.info(
-                "📋 **What will happen when you click Run:**\n"
-                "1. A Chrome browser opens (visible by default so you can watch)\n"
-                "2. Logs into `www.bengalremedies.com:9000` with your credentials\n"
-                "3. Navigates: **Procurement → Order → Filter: Initiated**\n"
-                "4. Scrapes all pages of results\n"
-                "5. Saves as **Excel (.xlsx)** to the folder above"
-            )
+                st.info(
+                    "📋 **What will happen when you click Run:**\n"
+                    "1. A Chrome browser opens (visible by default so you can watch)\n"
+                    "2. Logs into `www.bengalremedies.com:9000` with your credentials\n"
+                    "3. Navigates: **Procurement → Order → Filter: Initiated**\n"
+                    "4. Scrapes all pages of results\n"
+                    "5. Saves as **Excel (.xlsx)** to the folder above and provides an instant browser download"
+                )
 
             run_col, _ = st.columns([2, 5])
             with run_col:
@@ -99,14 +120,24 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                 )
 
             if run_clicked:
-                with st.spinner("🤖 Agent running... Browser will open automatically. Please wait — this may take 1–3 minutes depending on data size..."):
+                spinner_msg = (
+                    "🤖 Cloud Agent running... Scraping initiated orders from portal. Please wait 1–3 minutes..."
+                    if is_cloud else
+                    "🤖 Agent running... Browser will open automatically. Please wait — this may take 1–3 minutes depending on data size..."
+                )
+                with st.spinner(spinner_msg):
                     try:
+                        params = {}
+                        if not is_cloud and output_dir:
+                            params["output_dir"] = output_dir
+                        if not is_cloud:
+                            params["headless"] = str(headless_mode).lower()
+                        else:
+                            params["headless"] = "true"
+
                         resp = requests.post(
                             f"{BACKEND_URL}/procurement/download-initiated-orders",
-                            params={
-                                "output_dir": output_dir,
-                                "headless": str(headless_mode).lower(),
-                            },
+                            params=params,
                             timeout=300,  # 5 minute timeout for full pagination scrape
                         )
                         if resp.status_code == 200:
@@ -125,7 +156,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                     except requests.exceptions.Timeout:
                         st.session_state["download_agent_result"] = {
                             "status": "error",
-                            "message": "⏱️ Request timed out. The agent may still be running. Check your save folder for the Excel file.",
+                            "message": "⏱️ Request timed out. The agent may still be running in the background.",
                             "log": [],
                         }
                     except Exception as e:
@@ -140,11 +171,32 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
             result = st.session_state.get("download_agent_result")
             if result:
                 if result.get("status") == "success":
+                    filename = result.get("filename", "initiated_orders.xlsx")
+                    rows_count = result.get("rows_downloaded", 0)
+                    file_path = result.get("file_path", "")
+                    file_b64 = result.get("file_b64", "")
+
                     st.success(
-                        f"✅ **Download Complete!**\n\n"
-                        f"- **Rows Downloaded**: {result.get('rows_downloaded', 0):,}\n"
-                        f"- **Saved To**: `{result.get('file_path', 'N/A')}`"
+                        f"✅ **Download Automation Complete!**\n\n"
+                        f"- **Records Captured**: **{rows_count:,}** product row(s)\n"
+                        f"- **File Name**: `{filename}`"
+                        + (f"\n- **Saved to Server**: `{file_path}`" if not is_cloud and file_path else "")
                     )
+
+                    # ── Direct Browser Download Button ──
+                    if file_b64:
+                        import base64
+                        file_bytes = base64.b64decode(file_b64)
+                        st.download_button(
+                            label=f"💾 Click to Save Excel File to Your Computer ({filename})",
+                            data=file_bytes,
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            use_container_width=True,
+                            help="Click to download the scraped orders Excel file directly to your local device.",
+                            key="btn_download_excel_browser",
+                        )
                 else:
                     st.error(f"❌ **Agent Error**: {result.get('message', 'Unknown error')}")
 
@@ -156,6 +208,7 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                             st.text(line)
 
         st.markdown("---")
+
 
 
 

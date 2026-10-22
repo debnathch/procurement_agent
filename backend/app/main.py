@@ -67,7 +67,18 @@ def root():
 # ---------------------------------------------------------------------------
 @app.get('/health', tags=['system'])
 def health():
-    return {'status': 'ok', 'app': settings.app_name, 'mode': settings.execution_mode}
+    import os, sys
+    is_cloud = bool(
+        os.environ.get("RENDER")
+        or os.environ.get("DOCKER_RUNTIME")
+        or (sys.platform.startswith("linux") and not os.environ.get("DISPLAY"))
+    )
+    return {
+        'status': 'ok',
+        'app': settings.app_name,
+        'mode': settings.execution_mode,
+        'is_cloud': is_cloud,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1327,8 +1338,8 @@ def seed_demo_sales_data(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @app.post('/procurement/download-initiated-orders', tags=['procurement'])
 async def download_initiated_orders(
-    output_dir: str = "/Users/debz/Documents/BR/Project/Ben_Rem/excel_marg/latest",
-    headless: bool = False,
+    output_dir: str | None = None,
+    headless: bool | None = None,
 ):
     """
     Triggers the Playwright-based web automation agent to:
@@ -1337,26 +1348,42 @@ async def download_initiated_orders(
       3. Navigate: Procurement → Order
       4. Filter by Status = Initiated
       5. Scrape ALL paginated table rows
-      6. Save as Excel (.xlsx) to output_dir
-
-    Returns a JSON result with file_path, rows_downloaded, and progress log.
+      6. Save as Excel (.xlsx) and return metadata + base64 file data for direct web download
     """
-    import asyncio
+    import base64
+    from pathlib import Path
     try:
-        from backend.app.agents.download_orders_agent import run_download_agent
+        from backend.app.agents.download_orders_agent import (
+            run_download_agent,
+            get_default_output_dir,
+            is_cloud_environment,
+        )
     except ImportError as e:
         raise HTTPException(status_code=500, detail=f"Agent import error: {e}")
 
+    effective_output_dir = output_dir or str(get_default_output_dir())
+    effective_headless = headless if headless is not None else is_cloud_environment()
+
     try:
         result = await run_download_agent(
-            output_dir=output_dir,
-            headless=headless,
-            status_filter="initiated",
+            output_dir=effective_output_dir,
+            headless=effective_headless,
+            status_filter="Initiated",
         )
         if result["success"]:
+            file_bytes = result.get("file_bytes")
+            if not file_bytes and result.get("file_path"):
+                with open(result["file_path"], "rb") as f:
+                    file_bytes = f.read()
+
+            b64_str = base64.b64encode(file_bytes).decode("utf-8") if file_bytes else ""
+            filename = result.get("filename") or (Path(result["file_path"]).name if result.get("file_path") else "initiated_orders.xlsx")
+
             return {
                 "status": "success",
                 "file_path": result["file_path"],
+                "filename": filename,
+                "file_b64": b64_str,
                 "rows_downloaded": result["rows_downloaded"],
                 "message": result["message"],
                 "log": result["log"],
@@ -1371,6 +1398,54 @@ async def download_initiated_orders(
             )
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/procurement/download-initiated-orders-file', tags=['procurement'])
+async def download_initiated_orders_file(
+    headless: bool | None = None,
+):
+    """
+    Runs the download orders agent and directly streams the resulting Excel (.xlsx) file
+    as a downloadable browser attachment.
+    """
+    from pathlib import Path
+    try:
+        from backend.app.agents.download_orders_agent import (
+            run_download_agent,
+            get_default_output_dir,
+            is_cloud_environment,
+        )
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Agent import error: {e}")
+
+    effective_headless = headless if headless is not None else is_cloud_environment()
+    try:
+        result = await run_download_agent(
+            output_dir=get_default_output_dir(),
+            headless=effective_headless,
+            status_filter="Initiated",
+        )
+        if not result["success"]:
+            raise HTTPException(status_code=500, detail=result.get("message", "Scrape failed"))
+
+        file_bytes = result.get("file_bytes")
+        if not file_bytes and result.get("file_path"):
+            with open(result["file_path"], "rb") as f:
+                file_bytes = f.read()
+
+        filename = result.get("filename") or (Path(result["file_path"]).name if result.get("file_path") else "initiated_orders.xlsx")
+        return Response(
+            content=file_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post('/procurement/upload-ordered-items', tags=['procurement'])
 async def upload_ordered_items(
     file: UploadFile = File(...),
