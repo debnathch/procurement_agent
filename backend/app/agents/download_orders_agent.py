@@ -110,6 +110,33 @@ async def _extract_screen_table_rows(page) -> tuple[list[str], list[dict]]:
     return data_headers, rows
 
 
+def ensure_playwright_browser_installed() -> bool:
+    """
+    Checks if Playwright Chromium browser is installed.
+    If missing, runs `python -m playwright install chromium` via subprocess.
+    """
+    import subprocess
+    _emit("📦 Installing Playwright Chromium browser binary (auto-install)...")
+    try:
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+        _emit(f"   Executing: {' '.join(cmd)}")
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if res.returncode == 0:
+            _emit("   ✅ Playwright Chromium browser installed successfully.")
+            return True
+        else:
+            _emit(f"   ⚠️ Playwright install returned code {res.returncode}: {res.stderr or res.stdout}")
+            return False
+    except Exception as e:
+        _emit(f"   ❌ Error running playwright install: {e}")
+        return False
+
+
 async def run_download_agent(
     output_dir: str | Path = OUTPUT_DIR,
     headless: bool = HEADLESS,
@@ -152,10 +179,26 @@ async def run_download_agent(
         ])
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=headless,
-            args=launch_args,
-        )
+        try:
+            browser = await pw.chromium.launch(
+                headless=headless,
+                args=launch_args,
+            )
+        except Exception as launch_err:
+            err_msg = str(launch_err)
+            if "Executable doesn't exist" in err_msg or "playwright install" in err_msg:
+                _emit("⚠️ Playwright Chromium browser binary not found in cache. Starting automatic installation...")
+                installed = ensure_playwright_browser_installed()
+                if not installed:
+                    raise RuntimeError(f"Playwright Chromium browser binary is missing and auto-install failed: {err_msg}")
+                _emit("🔄 Retrying browser launch now that Chromium is installed...")
+                browser = await pw.chromium.launch(
+                    headless=headless,
+                    args=launch_args,
+                )
+            else:
+                raise
+
         context = await browser.new_context(
             viewport={"width": 1440, "height": 900},
             ignore_https_errors=True,

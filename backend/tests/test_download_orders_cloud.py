@@ -98,3 +98,17 @@ def test_download_initiated_orders_file_streaming_mocked():
         assert resp.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         assert 'attachment; filename="initiated_orders_stream.xlsx"' in resp.headers["Content-Disposition"]
         assert resp.body == sample_bytes
+
+
+def test_ensure_playwright_browser_installed():
+    from backend.app.agents.download_orders_agent import ensure_playwright_browser_installed
+    from unittest.mock import MagicMock
+
+    with patch("subprocess.run") as mock_sub:
+        mock_sub.return_value = MagicMock(returncode=0, stdout="Browser installed", stderr="")
+        assert ensure_playwright_browser_installed() is True
+
+    with patch("subprocess.run") as mock_sub:
+        mock_sub.return_value = MagicMock(returncode=1, stdout="", stderr="Failed")
+        assert ensure_playwright_browser_installed() is False
+
