@@ -207,10 +207,11 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                 else:
                     st.error(f"❌ **Agent Error**: {result.get('message', 'Unknown error')}")
 
-                # Show progress log in expander
+                # Show progress log in expander (auto-expanded on error for immediate diagnostics)
                 log_lines = result.get("log", [])
                 if log_lines:
-                    with st.expander("📋 View Agent Progress Log", expanded=False):
+                    is_err = result.get("status") != "success"
+                    with st.expander("📋 View Agent Progress Log", expanded=is_err):
                         for line in log_lines:
                             st.text(line)
 

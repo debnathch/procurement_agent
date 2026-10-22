@@ -210,13 +210,12 @@ async def run_download_agent(
             ignore_https_errors=True,
             extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             },
         )
         page = await context.new_page()
 
         try:
-            # ── 1. Navigate directly to Portal Login ──────────────────────────
+            # ── 1. Navigate directly to Portal Login (with retry & fallback) ───
             # Direct navigation to /login avoids redirect loops and in-flight navigation races
             clean_target = TARGET_URL.rstrip('/')
             candidate_bases = [clean_target]
@@ -230,32 +229,46 @@ async def run_download_agent(
             candidate_bases = list(dict.fromkeys(candidate_bases))
 
             connected_base = None
+            candidate_errors: list[tuple[str, str]] = []
+            max_attempts = 2
 
-            for c_base in candidate_bases:
-                login_url = f"{c_base}/login" if not c_base.endswith("/login") else c_base
-                _emit(f"🌐 Connecting directly to login: {login_url} ...")
-                try:
-                    # Cancel any prior hanging navigation
+            for attempt in range(1, max_attempts + 1):
+                _emit(f"🔄 Connection cycle {attempt}/{max_attempts} across candidates...")
+                for c_base in candidate_bases:
+                    login_url = f"{c_base}/login" if not c_base.endswith("/login") else c_base
+                    _emit(f"🌐 Connecting directly to login: {login_url} ...")
                     try:
-                        await page.evaluate("() => window.stop()")
-                    except Exception:
-                        pass
+                        # Clean page state before each attempt
+                        try:
+                            await page.goto("about:blank", timeout=5000)
+                        except Exception:
+                            pass
 
-                    await page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
-                    _emit("   ⏳ Page loaded. Waiting for login form fields...")
+                        await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+                        _emit("   ⏳ Page loaded. Waiting for login form fields (emailId)...")
 
-                    email_field = page.locator('input[name="emailId"], input[type="email"], #email').first
-                    await email_field.wait_for(state="visible", timeout=25000)
+                        email_field = page.locator('input[name="emailId"], input[type="email"], #email').first
+                        await email_field.wait_for(state="visible", timeout=45000)
 
-                    connected_base = c_base
-                    _emit(f"   ✅ Login form visible at: {login_url}")
+                        connected_base = c_base
+                        _emit(f"   ✅ Login form visible and ready at: {login_url}")
+                        break
+                    except Exception as nav_ex:
+                        err_str = str(nav_ex).split("\n")[0]
+                        candidate_errors.append((login_url, err_str))
+                        _emit(f"   ⚠️ Could not reach {login_url} ({err_str}). Trying next candidate...")
+
+                if connected_base:
                     break
-                except Exception as nav_ex:
-                    _emit(f"   ⚠️ Could not reach {login_url} ({nav_ex}). Trying next candidate...")
+                if attempt < max_attempts:
+                    _emit("   ⏳ Waiting 3s before retry cycle...")
+                    await asyncio.sleep(3)
 
             if not connected_base:
+                unique_errs = "\n".join(f"  • {u}: {e}" for u, e in candidate_errors[-len(candidate_bases):])
                 err_msg = (
-                    f"Unable to reach Bengal Remedies portal login on port 9000 from cloud (attempted: {', '.join(candidate_bases)}).\n"
+                    f"Unable to reach Bengal Remedies portal login on port 9000 from cloud.\n"
+                    f"Candidate results:\n{unique_errs}\n"
                     f"If the server is on AWS EC2, please ensure your EC2 Security Group has an Inbound Rule for "
                     f"Custom TCP port 9000 from 0.0.0.0/0 (Anywhere IPv4)."
                 )
