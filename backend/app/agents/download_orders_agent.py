@@ -54,7 +54,7 @@ def get_default_output_dir() -> Path:
     tmp.mkdir(parents=True, exist_ok=True)
     return tmp
 
-TARGET_URL      = "http://www.bengalremedies.com:9000"
+TARGET_URL      = os.environ.get("PORTAL_URL", "http://www.bengalremedies.com:9000").rstrip("/")
 LOGIN_EMAIL     = "debnathch@gmail.com"
 LOGIN_PASSWORD  = "Br@2023"
 OUTPUT_DIR      = get_default_output_dir()
@@ -176,6 +176,7 @@ async def run_download_agent(
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
         ])
 
     async with async_playwright() as pw:
@@ -201,20 +202,55 @@ async def run_download_agent(
 
         context = await browser.new_context(
             viewport={"width": 1440, "height": 900},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="en-US",
+            timezone_id="Asia/Kolkata",
             ignore_https_errors=True,
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            },
         )
         page = await context.new_page()
 
         try:
-            # ── 1. Navigate to Portal ─────────────────────────────────────────
-            _emit("🌐 Connecting to portal: http://www.bengalremedies.com:9000 ...")
-            await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(2000)
+            # ── 1. Navigate to Portal with multi-URL fallback & resilient commit wait ──
+            candidate_urls = list(dict.fromkeys([
+                TARGET_URL,
+                "http://bengalremedies.com:9000",
+                "http://13.127.16.211:9000",
+            ]))
+            connected_url = None
+
+            for c_url in candidate_urls:
+                _emit(f"🌐 Connecting to portal: {c_url} ...")
+                try:
+                    # wait_until='commit' completes on initial HTTP headers without hanging on slow assets
+                    await page.goto(c_url, wait_until="commit", timeout=45000)
+                    _emit("   ⏳ Initial response received. Waiting for login interface...")
+                    email_field = page.locator('input[name="emailId"], input[type="email"], #email').first
+                    await email_field.wait_for(state="visible", timeout=30000)
+                    connected_url = c_url
+                    _emit(f"   ✅ Portal connected and login ready at: {connected_url}")
+                    break
+                except Exception as nav_ex:
+                    _emit(f"   ⚠️ Could not reach {c_url} ({nav_ex}). Trying next fallback...")
+
+            if not connected_url:
+                err_msg = (
+                    f"Unable to reach Bengal Remedies portal on port 9000 from cloud (attempted: {', '.join(candidate_urls)}).\n"
+                    f"If the server is on AWS EC2, please ensure your EC2 Security Group has an Inbound Rule for "
+                    f"Custom TCP port 9000 from 0.0.0.0/0 (Anywhere IPv4)."
+                )
+                _emit(f"❌ {err_msg}")
+                raise RuntimeError(err_msg)
+
+            await page.wait_for_timeout(1000)
 
             # ── 2. Login ──────────────────────────────────────────────────────
             _emit("🔐 Entering credentials...")
             email_field = page.locator('input[name="emailId"], input[type="email"], #email').first
-            await email_field.wait_for(state="visible", timeout=10000)
+            await email_field.wait_for(state="visible", timeout=15000)
             await email_field.fill(LOGIN_EMAIL)
             _emit("   ✅ Email entered: debnathch@gmail.com")
 
@@ -240,7 +276,7 @@ async def run_download_agent(
                 await orders_link.click()
                 await page.wait_for_timeout(3000)
             else:
-                await page.goto(f"{TARGET_URL}/procurement/procurement-order", timeout=15000)
+                await page.goto(f"{connected_url}/procurement/procurement-order", wait_until="commit", timeout=30000)
                 await page.wait_for_timeout(3000)
 
             _emit(f"   📍 Orders page reached: {page.url}")

@@ -148,10 +148,17 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                                 err = resp.json()
                             except Exception:
                                 err = {"message": resp.text}
+                            err_detail = err.get("detail", err)
+                            if isinstance(err_detail, dict):
+                                err_msg = err_detail.get("message", str(err_detail))
+                                err_log = err_detail.get("log", [])
+                            else:
+                                err_msg = str(err_detail)
+                                err_log = err.get("log", [])
                             st.session_state["download_agent_result"] = {
                                 "status": "error",
-                                "message": err.get("detail", {}).get("message", str(err)) if isinstance(err.get("detail"), dict) else str(err),
-                                "log": err.get("detail", {}).get("log", []) if isinstance(err.get("detail"), dict) else [],
+                                "message": err_msg,
+                                "log": err_log,
                             }
                     except requests.exceptions.Timeout:
                         st.session_state["download_agent_result"] = {
