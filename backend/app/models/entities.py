@@ -245,6 +245,8 @@ class ProcurementProposal(Base):
     avg_daily_demand: Mapped[float] = mapped_column(Float, default=0.0)
     demand_source: Mapped[str | None] = mapped_column(String(64))
     lead_time_days: Mapped[int] = mapped_column(Integer, default=45)
+    review_days: Mapped[int] = mapped_column(Integer, default=7)
+    safety_days: Mapped[int] = mapped_column(Integer, default=3)
     stock_on_hand: Mapped[float] = mapped_column(Float, default=0.0)
     stock_on_order: Mapped[float] = mapped_column(Float, default=0.0)
     near_expiry_qty: Mapped[float] = mapped_column(Float, default=0.0)

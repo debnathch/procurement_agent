@@ -116,6 +116,8 @@ def init_db():
             ('procurement_proposals', 'company', 'VARCHAR(256)'),
             ('procurement_proposals', 'manufacturer', 'VARCHAR(256)'),
             ('procurement_proposals', 'batch_numbers', 'VARCHAR(512)'),
+            ('procurement_proposals', 'review_days', 'INTEGER DEFAULT 7'),
+            ('procurement_proposals', 'safety_days', 'INTEGER DEFAULT 3'),
             # v2 — sales_history product name & customer traceability
             ('sales_history', 'product_name', 'VARCHAR(256)'),
             ('sales_history', 'customer_code', 'VARCHAR(64)'),

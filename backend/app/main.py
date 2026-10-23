@@ -179,19 +179,62 @@ def _supplier_dict(s: Supplier) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Manufacturers
+# ---------------------------------------------------------------------------
+@app.get('/manufacturers', tags=['products'])
+def list_manufacturers(db: Session = Depends(get_db)):
+    """Retrieve distinct list of medicine manufacturers saved in the database."""
+    mfrs = db.scalars(
+        select(Product.manufacturer)
+        .where(Product.manufacturer.isnot(None))
+        .distinct()
+    ).all()
+    clean = sorted(list({m.strip() for m in mfrs if m and m.strip() and m.strip().upper() not in ('NONE', 'GENERAL', 'NAN', '-')}))
+    return clean
+
+
+# ---------------------------------------------------------------------------
 # Agent — run procurement
 # ---------------------------------------------------------------------------
 class RunRequest(BaseModel):
     product_codes: Optional[list[str]] = None
     lead_time_days: Optional[int] = None
+    review_days: Optional[int] = None
+    safety_days: Optional[int] = None
+    manufacturer: Optional[str] = None
 
 
 @app.post('/runs', tags=['agent'], status_code=status.HTTP_201_CREATED)
-def trigger_run(req: RunRequest = RunRequest(), db: Session = Depends(get_db)):
-    """Trigger a procurement agent run. Returns run_id and proposal count."""
+def trigger_run(
+    req: RunRequest = RunRequest(),
+    lead_time_days: Optional[int] = Query(None),
+    review_days: Optional[int] = Query(None),
+    safety_days: Optional[int] = Query(None),
+    manufacturer: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Trigger a procurement agent run with configurable policy and manufacturer parameters."""
+    eff_lead = req.lead_time_days if req.lead_time_days is not None else (lead_time_days if isinstance(lead_time_days, int) else None)
+    eff_review = req.review_days if req.review_days is not None else (review_days if isinstance(review_days, int) else None)
+    eff_safety = req.safety_days if req.safety_days is not None else (safety_days if isinstance(safety_days, int) else None)
+    eff_mfr = req.manufacturer if req.manufacturer is not None else (manufacturer if isinstance(manufacturer, str) else None)
+
     agent = ProcurementAgent(db)
-    run_id, proposals = agent.run(product_codes=req.product_codes, lead_time_override=req.lead_time_days)
-    return {'run_id': run_id, 'proposals': len(proposals)}
+    run_id, proposals = agent.run(
+        product_codes=req.product_codes,
+        lead_time_override=eff_lead,
+        review_days_override=eff_review,
+        safety_days_override=eff_safety,
+        manufacturer_override=eff_mfr,
+    )
+    return {
+        'run_id': run_id,
+        'proposals': len(proposals),
+        'lead_time_days': eff_lead or settings.default_lead_time_days,
+        'review_days': eff_review or settings.default_review_days,
+        'safety_days': eff_safety or settings.default_safety_days,
+        'manufacturer': eff_mfr or 'All Manufacturers',
+    }
 
 
 @app.get('/runs', tags=['agent'])
@@ -217,6 +260,8 @@ def list_runs(db: Session = Depends(get_db)):
 @app.get('/procurement/no-reorder', tags=['agent'])
 def list_no_reorder_products(
     lead_time_days: Optional[int] = None,
+    review_days: Optional[int] = None,
+    safety_days: Optional[int] = None,
     search: Optional[str] = None,
     company: Optional[str] = None,
     manufacturer: Optional[str] = None,
@@ -224,10 +269,15 @@ def list_no_reorder_products(
 ):
     """
     Returns active products with Net Need < 0, ordered alphabetically by character.
-    Supports optional search, company, and manufacturer filtering.
+    Supports optional search, company, manufacturer, and coverage policy filtering.
     """
     agent = ProcurementAgent(db)
-    items = agent.get_no_reorder_products(lead_time_override=lead_time_days)
+    items = agent.get_no_reorder_products(
+        lead_time_override=lead_time_days,
+        review_days_override=review_days,
+        safety_days_override=safety_days,
+        manufacturer_override=manufacturer,
+    )
     if company and company.lower() != 'all companies':
         items = [i for i in items if (i.get('company') or '').lower() == company.lower()]
     if manufacturer and manufacturer.lower() != 'all manufacturers':
@@ -795,6 +845,9 @@ def _proposal_dict(p: ProcurementProposal) -> dict:
         'avg_daily_demand': p.avg_daily_demand,
         'demand_source': p.demand_source,
         'lead_time_days': p.lead_time_days,
+        'review_days': getattr(p, 'review_days', 7) or 7,
+        'safety_days': getattr(p, 'safety_days', 3) or 3,
+        'target_coverage_days': (p.lead_time_days or 45) + (getattr(p, 'review_days', 7) or 7) + (getattr(p, 'safety_days', 3) or 3),
         'stock_on_hand': p.stock_on_hand,
         'stock_on_order': p.stock_on_order,
         'near_expiry_qty': p.near_expiry_qty,
@@ -1131,6 +1184,9 @@ def upload_marg_excel(
     file: UploadFile = File(...),
     run_agent: bool = Query(True, description='Automatically run procurement agent after ingestion'),
     lead_time_days: Optional[int] = Query(None, description='Configurable lead time override in days'),
+    review_days: Optional[int] = Query(None, description='Configurable review cycle override in days'),
+    safety_days: Optional[int] = Query(None, description='Configurable safety buffer override in days'),
+    manufacturer: Optional[str] = Query(None, description='Optional manufacturer scope override'),
     clear_existing: bool = Query(True, description='Clear all previous database records before ingesting fresh data'),
     db: Session = Depends(get_db)
 ):
@@ -1174,7 +1230,12 @@ def upload_marg_excel(
 
     if run_agent:
         agent = ProcurementAgent(db)
-        run_id, proposals = agent.run(lead_time_override=lead_time_days)
+        run_id, proposals = agent.run(
+            lead_time_override=lead_time_days,
+            review_days_override=review_days,
+            safety_days_override=safety_days,
+            manufacturer_override=manufacturer,
+        )
         response_data['agent_run'] = {
             'run_id': run_id,
             'proposals_count': len(proposals),

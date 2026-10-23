@@ -231,19 +231,122 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⏱️ Coverage & Lead Time Policy")
+
+    # Fetch available manufacturers from backend
+    available_manufacturers = []
+    if is_healthy:
+        try:
+            m_res = requests.get(f"{BACKEND_URL}/manufacturers", timeout=3)
+            if m_res.status_code == 200:
+                available_manufacturers = m_res.json()
+        except Exception:
+            available_manufacturers = []
+
+    mfr_options = ["All Manufacturers"] + [m for m in available_manufacturers if m != "All Manufacturers"]
+    current_saved_mfr = st.session_state.get("policy_selected_mfr", "All Manufacturers")
+    mfr_idx = mfr_options.index(current_saved_mfr) if current_saved_mfr in mfr_options else 0
+
+    selected_policy_mfr = st.sidebar.selectbox(
+        "🏭 Manufacturer Scope",
+        options=mfr_options,
+        index=mfr_idx,
+        key="policy_mfr_selector",
+        help="Select a specific manufacturer to customize parameters for its products, or 'All Manufacturers' to apply globally."
+    )
+
+    # Initialize manufacturer-specific policy storage in session state
+    if "manufacturer_policies" not in st.session_state:
+        st.session_state["manufacturer_policies"] = {}
+
+    # Load defaults or previously saved policy for the selected scope
+    saved_policy = st.session_state["manufacturer_policies"].get(
+        selected_policy_mfr,
+        {
+            "lead_time": int(st.session_state.get("policy_lead_time", 45)),
+            "review_days": int(st.session_state.get("policy_review_days", 7)),
+            "safety_days": int(st.session_state.get("policy_safety_days", 3)),
+        }
+    )
+
     config_lead_time = st.sidebar.number_input(
         "Default Lead Time (Days)",
         min_value=1,
         max_value=180,
-        value=45,
+        value=int(saved_policy.get("lead_time", 45)),
         step=1,
-        help="Configurable supplier delivery lead time used for coverage calculations"
+        key=f"policy_lead_time_{selected_policy_mfr}",
+        help="Supplier delivery lead time in days (L) used for target stock coverage calculation."
     )
-    config_review_days = st.sidebar.number_input("Review Cycle (Days)", min_value=1, max_value=30, value=7, step=1)
-    config_safety_days = st.sidebar.number_input("Safety Buffer (Days)", min_value=0, max_value=30, value=3, step=1)
+    config_review_days = st.sidebar.number_input(
+        "Review Cycle (Days)",
+        min_value=1,
+        max_value=60,
+        value=int(saved_policy.get("review_days", 7)),
+        step=1,
+        key=f"policy_review_days_{selected_policy_mfr}",
+        help="Procurement review cycle interval in days (R)."
+    )
+    config_safety_days = st.sidebar.number_input(
+        "Safety Buffer (Days)",
+        min_value=0,
+        max_value=60,
+        value=int(saved_policy.get("safety_days", 3)),
+        step=1,
+        key=f"policy_safety_days_{selected_policy_mfr}",
+        help="Safety buffer in days (S) to guard against delivery delays or unexpected demand surges."
+    )
+
     total_coverage = int(config_lead_time + config_review_days + config_safety_days)
-    st.sidebar.info(f"📊 Total Target Coverage: **{total_coverage} days** ({int(config_lead_time)}d lead + {int(config_review_days)}d review + {int(config_safety_days)}d safety)")
-    st.sidebar.caption("🛡️ **FEFO Expiry Horizon**: 180 days (batches expiring within 6 months flagged)")
+    mfr_scope_text = f"for **{selected_policy_mfr}**" if selected_policy_mfr != "All Manufacturers" else "across **All Products**"
+
+    st.sidebar.info(
+        f"📊 Total Target Coverage: **{total_coverage} days** {mfr_scope_text}\n\n"
+        f"Formula: `Target = Demand × ({int(config_lead_time)}d lead + {int(config_review_days)}d review + {int(config_safety_days)}d safety)`"
+    )
+    st.sidebar.caption("🛡️ **FEFO Expiry Horizon**: 180 days (batches expiring within 6 months flagged/excluded)")
+
+    if st.sidebar.button(
+        "⚡ Apply Policy to Calculation",
+        key="btn_apply_policy_calc",
+        type="primary",
+        use_container_width=True,
+        help="Re-runs deterministic replenishment mathematics with these configured lead time, review cycle, and safety buffer parameters."
+    ):
+        # Save active policy in session state
+        st.session_state["policy_selected_mfr"] = selected_policy_mfr
+        st.session_state["policy_lead_time"] = int(config_lead_time)
+        st.session_state["policy_review_days"] = int(config_review_days)
+        st.session_state["policy_safety_days"] = int(config_safety_days)
+        st.session_state["manufacturer_policies"][selected_policy_mfr] = {
+            "lead_time": int(config_lead_time),
+            "review_days": int(config_review_days),
+            "safety_days": int(config_safety_days),
+        }
+
+        with st.spinner(f"Applying policy ({total_coverage}d coverage) and re-calculating replenishment proposals..."):
+            try:
+                payload = {
+                    "lead_time_days": int(config_lead_time),
+                    "review_days": int(config_review_days),
+                    "safety_days": int(config_safety_days),
+                }
+                if selected_policy_mfr != "All Manufacturers":
+                    payload["manufacturer"] = selected_policy_mfr
+
+                calc_res = requests.post(f"{BACKEND_URL}/runs", json=payload, timeout=30)
+                if calc_res.status_code in (200, 201):
+                    res_data = calc_res.json()
+                    st.session_state["upload_banner"] = (
+                        f"🎉 Policy Applied! Target coverage set to **{total_coverage} days** "
+                        f"({int(config_lead_time)}d lead + {int(config_review_days)}d review + {int(config_safety_days)}d safety) "
+                        f"{mfr_scope_text}. Re-calculated **{res_data.get('proposals', 0)}** replenishment proposal(s)."
+                    )
+                    st.query_params["tab"] = "proposals"
+                    st.rerun()
+                else:
+                    st.sidebar.error(f"Failed to apply policy: {calc_res.text}")
+            except Exception as e:
+                st.sidebar.error(f"Error applying policy: {e}")
     
 
     
@@ -420,8 +523,9 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
     
                                 files = {'file': (f.name, f.getvalue(), f.type)}
                                 try:
+                                    mfr_param = f"&manufacturer={selected_policy_mfr}" if selected_policy_mfr != 'All Manufacturers' else ""
                                     upload_res = requests.post(
-                                        f"{BACKEND_URL}/ingestion/upload-marg-excel?run_agent={'true' if should_run_agent else 'false'}&lead_time_days={int(config_lead_time)}&clear_existing={'true' if should_clear else 'false'}",
+                                        f"{BACKEND_URL}/ingestion/upload-marg-excel?run_agent={'true' if should_run_agent else 'false'}&lead_time_days={int(config_lead_time)}&review_days={int(config_review_days)}&safety_days={int(config_safety_days)}{mfr_param}&clear_existing={'true' if should_clear else 'false'}",
                                         files=files,
                                         timeout=300
                                     )
@@ -534,7 +638,14 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                 if st.button("🚀 Re-Run Procurement Suggestions with Updated Pipeline Stock", type="primary", key="btn_rerun_with_pipeline"):
                     with st.spinner("Re-computing replenishment suggestions with live pipeline on-order stock..."):
                         try:
-                            run_res = requests.post(f"{BACKEND_URL}/runs?lead_time_days={int(config_lead_time)}", timeout=30)
+                            run_payload = {
+                                "lead_time_days": int(config_lead_time),
+                                "review_days": int(config_review_days),
+                                "safety_days": int(config_safety_days),
+                            }
+                            if selected_policy_mfr != "All Manufacturers":
+                                run_payload["manufacturer"] = selected_policy_mfr
+                            run_res = requests.post(f"{BACKEND_URL}/runs", json=run_payload, timeout=30)
                             if run_res.status_code == 200:
                                 st.session_state["upload_banner"] = "🎉 Replenishment suggestions re-calculated! Pipeline on-order stock deducted from net need."
                                 st.query_params["tab"] = "proposals"
@@ -681,8 +792,15 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                 st.info("No proposals found for the selected filter. Upload a MARG Excel or click below to trigger a run:")
                 if st.button("⚡ Run Procurement Agent Now", key="trigger_run_btn"):
                     if is_healthy:
-                        r_res = requests.post(f"{BACKEND_URL}/runs", json={"lead_time_days": int(config_lead_time)}, timeout=30)
-                        if r_res.status_code == 201:
+                        r_payload = {
+                            "lead_time_days": int(config_lead_time),
+                            "review_days": int(config_review_days),
+                            "safety_days": int(config_safety_days),
+                        }
+                        if selected_policy_mfr != "All Manufacturers":
+                            r_payload["manufacturer"] = selected_policy_mfr
+                        r_res = requests.post(f"{BACKEND_URL}/runs", json=r_payload, timeout=30)
+                        if r_res.status_code in (200, 201):
                             st.success("Procurement Run finished!")
                             st.query_params["tab"] = "proposals"
                             st.rerun()
@@ -806,7 +924,15 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
                     c2.metric("Stock on Order", f"{p.get('stock_on_order', 0):g}")
                     c3.metric("Near-Expiry Stock", f"{p.get('near_expiry_qty', 0):g}")
                     c4.metric("Avg Daily Demand", f"{p.get('avg_daily_demand', 0):.2f}/day")
-                    c5.metric("Lead Time", f"{p.get('lead_time_days', int(config_lead_time))} days")
+                    p_lead = p.get('lead_time_days', int(config_lead_time))
+                    p_rev = p.get('review_days', int(config_review_days))
+                    p_saf = p.get('safety_days', int(config_safety_days))
+                    p_cov = p.get('target_coverage_days', p_lead + p_rev + p_saf)
+                    c5.metric(
+                        "Target Coverage",
+                        f"{p_cov} days",
+                        help=f"Lead Time: {p_lead}d + Review Cycle: {p_rev}d + Safety Buffer: {p_saf}d"
+                    )
     
                     csup1, csup2 = st.columns(2)
                     csup1.info(f"🚚 **Default Supplier (Last Purchased):** {p.get('supplier_name', 'Default Supplier')}")
@@ -1079,9 +1205,16 @@ def render_procurement_page(BACKEND_URL: str, is_healthy: bool, health_info: dic
         no_reorder_items = []
         if is_healthy:
             try:
+                nr_params = {
+                    "lead_time_days": int(config_lead_time),
+                    "review_days": int(config_review_days),
+                    "safety_days": int(config_safety_days),
+                }
+                if selected_policy_mfr != "All Manufacturers":
+                    nr_params["manufacturer"] = selected_policy_mfr
                 nr_res = requests.get(
                     f"{BACKEND_URL}/procurement/no-reorder",
-                    params={"lead_time_days": int(config_lead_time)},
+                    params=nr_params,
                     timeout=20
                 )
                 if nr_res.status_code == 200:

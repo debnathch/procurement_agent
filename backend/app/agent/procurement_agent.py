@@ -79,6 +79,9 @@ class ProcurementAgent:
         self,
         product_codes: list[str] | None = None,
         lead_time_override: int | None = None,
+        review_days_override: int | None = None,
+        safety_days_override: int | None = None,
+        manufacturer_override: str | None = None,
     ) -> tuple[str, list[ProcurementProposal]]:
         """
         Execute an end-to-end procurement cycle across all or selected active products.
@@ -87,14 +90,29 @@ class ProcurementAgent:
         Candidate medicines are grouped by their canonical pharmaceutical identity
         (brand + dosage form + strength + volume). Pack string formatting variations
         (e.g., '-(10X1) 10X1' vs '10X1X1 10X1X1') are consolidated into a single proposal.
+
+        Runtime Policy Configuration:
+        - lead_time_override: Overrides default supplier delivery lead time (days).
+        - review_days_override: Overrides review cycle interval (days).
+        - safety_days_override: Overrides safety buffer (days).
+        - manufacturer_override: Optional filter to run calculation for a specific manufacturer.
         """
         from backend.app.adapters.excel import pharma_canonical_key
         from collections import defaultdict
+
+        if review_days_override is not None and isinstance(review_days_override, (int, float)):
+            self.policy.review_days = max(1, int(review_days_override))
+        if safety_days_override is not None and isinstance(safety_days_override, (int, float)):
+            self.policy.safety_days = max(0, int(safety_days_override))
+        if lead_time_override is not None and not isinstance(lead_time_override, (int, float)):
+            lead_time_override = None
 
         run_id = uuid.uuid4().hex
         stmt = select(Product).where(Product.reorder_enabled == True)
         if product_codes:
             stmt = stmt.where(Product.product_code.in_(product_codes))
+        if manufacturer_override and isinstance(manufacturer_override, str) and manufacturer_override.strip() and manufacturer_override.strip().lower() not in ('all manufacturers', 'all', ''):
+            stmt = stmt.where(Product.manufacturer == manufacturer_override.strip())
         raw_products = self.db.scalars(stmt).all()
 
         from backend.app.adapters.excel import is_footer_or_junk_row
@@ -224,6 +242,7 @@ class ProcurementAgent:
 
             rationale = (
                 f'Demand={demand:.2f}/day ({demand_source}); lead_time={lead_time}d; '
+                f'review={self.policy.review_days}d; safety={self.policy.safety_days}d; '
                 f'on_hand={inv["on_hand"]:.0f}; on_order={inv["on_order"]:.0f}; '
                 f'near_expiry={inv["near_expiry"]:.0f}; expired={inv["expired"]:.0f}; '
                 f'FEFO_usable={inv["usable_before_expiry"]:.0f}; target={calc["target_stock"]:.0f}; '
@@ -259,6 +278,8 @@ class ProcurementAgent:
                 avg_daily_demand=demand,
                 demand_source=demand_source,
                 lead_time_days=lead_time,
+                review_days=self.policy.review_days,
+                safety_days=self.policy.safety_days,
                 stock_on_hand=inv['on_hand'],
                 stock_on_order=inv['on_order'],
                 near_expiry_qty=inv['near_expiry'],
@@ -295,6 +316,9 @@ class ProcurementAgent:
         self,
         product_codes: list[str] | None = None,
         lead_time_override: int | None = None,
+        review_days_override: int | None = None,
+        safety_days_override: int | None = None,
+        manufacturer_override: str | None = None,
     ) -> list[dict]:
         """
         Identify and return all active products whose Net Replenishment Need is <= 0 (no order needed).
@@ -309,6 +333,9 @@ class ProcurementAgent:
         Args:
             product_codes (list[str] | None): Optional subset of product codes to inspect.
             lead_time_override (int | None): Optional lead time override in days.
+            review_days_override (int | None): Optional review cycle override in days.
+            safety_days_override (int | None): Optional safety buffer override in days.
+            manufacturer_override (str | None): Optional manufacturer filter.
 
         Returns:
             list[dict]: Alphabetical list of product surplus dictionaries with complete inventory metrics.
@@ -317,9 +344,18 @@ class ProcurementAgent:
         from sqlalchemy import func
         from backend.app.models.entities import InventoryBatch, SalesHistory
 
+        if review_days_override is not None and isinstance(review_days_override, (int, float)):
+            self.policy.review_days = max(1, int(review_days_override))
+        if safety_days_override is not None and isinstance(safety_days_override, (int, float)):
+            self.policy.safety_days = max(0, int(safety_days_override))
+        if lead_time_override is not None and not isinstance(lead_time_override, (int, float)):
+            lead_time_override = None
+
         stmt = select(Product).where(Product.reorder_enabled == True)
         if product_codes:
             stmt = stmt.where(Product.product_code.in_(product_codes))
+        if manufacturer_override and isinstance(manufacturer_override, str) and manufacturer_override.strip() and manufacturer_override.strip().lower() not in ('all manufacturers', 'all', ''):
+            stmt = stmt.where(Product.manufacturer == manufacturer_override.strip())
         stmt = stmt.order_by(Product.product_name.asc())
         products = self.db.scalars(stmt).all()
 
@@ -514,6 +550,9 @@ class ProcurementAgent:
                     'avg_daily_demand': round(demand, 4),
                     'demand_source': demand_source,
                     'lead_time_days': lead_time,
+                    'review_days': self.policy.review_days,
+                    'safety_days': self.policy.safety_days,
+                    'target_coverage_days': lead_time + self.policy.review_days + self.policy.safety_days,
                     'coverage_days': coverage_days,
                     'target_stock': round(target_stock, 2),
                     'net_need': round(net_need, 2),
@@ -526,7 +565,9 @@ class ProcurementAgent:
                     'rationale': (
                         f"Net need is {net_need:.1f} <= 0. Usable stock ({usable:g}) "
                         f"+ on-order ({on_order:g}) covers target demand ({target_stock:g}) "
-                        f"for {lead_time + settings.default_review_days + settings.default_safety_days} days. Surplus: {surplus_qty:g} units."
+                        f"for {lead_time + self.policy.review_days + self.policy.safety_days} days "
+                        f"(Lead: {lead_time}d + Review: {self.policy.review_days}d + Safety: {self.policy.safety_days}d). "
+                        f"Surplus: {surplus_qty:g} units."
                     )
                 })
 
