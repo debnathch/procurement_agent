@@ -107,9 +107,15 @@ def test_ingest_supplier_list_if_present():
 
 def test_ingest_outstanding_if_present():
     path = '/Users/debz/Downloads/outstanding.xlsx'
-    if os.path.exists(path):
-        with open(path, 'rb') as f:
-            content = f.read()
+    content = None
+    try:
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                content = f.read()
+    except (PermissionError, OSError):
+        content = None
+
+    if content is not None:
         parsed = MargExcelParser.parse_file(content, filename='outstanding.xlsx')
     else:
         # Generate synthetic in-memory MARG outstanding report
