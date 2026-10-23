@@ -92,6 +92,32 @@ def run_frontend_service():
     stcli.main()
 
 
+def ensure_playwright_installed():
+    """Ensure Playwright Chromium is installed at startup on cloud environments."""
+    is_cloud = (
+        os.environ.get("DOCKER_RUNTIME", "").strip() == "1"
+        or "RENDER" in os.environ
+        or not os.path.exists("/Users/debz")
+    )
+    if not is_cloud:
+        return
+
+    print("[*] Checking Playwright Chromium browser on startup...", flush=True)
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if res.returncode == 0:
+            print("[+] Playwright Chromium is ready.", flush=True)
+        else:
+            print(f"[!] Playwright auto-install notice: {res.stderr or res.stdout}", flush=True)
+    except Exception as e:
+        print(f"[!] Playwright auto-install check: {e}", flush=True)
+
+
 def supervisor():
     os.chdir(APP_DIR)
     if str(BUNDLE_DIR) not in sys.path:
@@ -99,11 +125,22 @@ def supervisor():
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(BUNDLE_DIR)
-    real_pw_cache = Path("/Users/debz/Library/Caches/ms-playwright")
-    if real_pw_cache.exists():
-        env["PLAYWRIGHT_BROWSERS_PATH"] = str(real_pw_cache)
+
+    # Resolve Playwright browser cache directory across platforms
+    if "PLAYWRIGHT_BROWSERS_PATH" not in env:
+        for candidate in [
+            Path("/Users/debz/Library/Caches/ms-playwright"),
+            Path("/opt/render/.cache/ms-playwright"),
+            Path.home() / ".cache/ms-playwright",
+        ]:
+            if candidate.exists():
+                env["PLAYWRIGHT_BROWSERS_PATH"] = str(candidate)
+                break
+
     env["HOME"] = str(BUNDLE_DIR)
     env["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
+
+    ensure_playwright_installed()
 
     print("=" * 60, flush=True)
     print("  Starting MARG Pharmaceutical Procurement Agent", flush=True)
